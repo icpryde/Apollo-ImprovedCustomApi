@@ -21,6 +21,11 @@ static const void *kApolloAvatarTextNodeKey = &kApolloAvatarTextNodeKey;
 static const void *kApolloAvatarOriginalAttributedTextKey = &kApolloAvatarOriginalAttributedTextKey;
 static const void *kApolloAvatarUsernameKey = &kApolloAvatarUsernameKey;
 static const void *kApolloAvatarAppliedTokenKey = &kApolloAvatarAppliedTokenKey;
+static const void *kApolloAvatarOwnedTextNodeKey = &kApolloAvatarOwnedTextNodeKey;
+static const void *kApolloAvatarInfoKey = &kApolloAvatarInfoKey;
+static const void *kApolloAvatarImageKey = &kApolloAvatarImageKey;
+static const void *kApolloAvatarDecoratorImageKey = &kApolloAvatarDecoratorImageKey;
+static const void *kApolloAvatarApplyingTextKey = &kApolloAvatarApplyingTextKey;
 static const void *kApolloAvatarPendingFetchUsernameKey = &kApolloAvatarPendingFetchUsernameKey;
 static const void *kApolloAvatarPendingLateReapplyUsernameKey = &kApolloAvatarPendingLateReapplyUsernameKey;
 static const void *kApolloProfileHeaderViewKey = &kApolloProfileHeaderViewKey;
@@ -380,15 +385,31 @@ static BOOL ApolloTextLooksAvatarPrepended(NSAttributedString *text) {
     return text.string.length > 0 && [text.string characterAtIndex:0] == NSAttachmentCharacter;
 }
 
+static BOOL ApolloAttributedTextContainsUsername(NSAttributedString *text, NSString *username) {
+    username = ApolloAvatarNormalizedUsername(username);
+    if (text.string.length == 0 || username.length == 0) return NO;
+    return [text.string rangeOfString:username options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
+static void ApolloClearAvatarTextNodeAssociations(id textNode) {
+    if (!textNode) return;
+    objc_setAssociatedObject(textNode, kApolloAvatarOriginalAttributedTextKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarUsernameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarAppliedTokenKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarInfoKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarImageKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarDecoratorImageKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarApplyingTextKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static void ApolloRestoreAvatarTextNode(id textNode) {
     NSAttributedString *original = objc_getAssociatedObject(textNode, kApolloAvatarOriginalAttributedTextKey);
+    ApolloClearAvatarTextNodeAssociations(textNode);
     if (original) {
         ApolloSetAttributedTextForNode(textNode, original);
         ApolloNodeSetNeedsLayout(textNode);
     }
-    objc_setAssociatedObject(textNode, kApolloAvatarOriginalAttributedTextKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloAvatarUsernameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloAvatarAppliedTokenKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
 
 static void ApolloRestoreAvatarForCell(id cell) {
@@ -425,15 +446,24 @@ static BOOL ApolloSetAvatarImageOnTextNode(id textNode, NSString *username, UIIm
         }
     }
     if (!baseText) baseText = current;
-    if (![baseText.string.lowercaseString containsString:username.lowercaseString]) return NO;
+    if (!ApolloAttributedTextContainsUsername(baseText, username)) return NO;
     if ([appliedToken isEqualToString:token] && ApolloTextLooksAvatarPrepended(current)) return NO;
 
     objc_setAssociatedObject(textNode, kApolloAvatarOriginalAttributedTextKey, baseText, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloAvatarUsernameKey, username, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloAvatarAppliedTokenKey, token, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarInfoKey, info, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarImageKey, avatarImage, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarDecoratorImageKey, decoratorImage, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     NSAttributedString *updated = ApolloAttributedTextByPrependingAvatar(baseText, avatarImage, decoratorImage, info);
-    ApolloSetAttributedTextForNode(textNode, updated);
+    objc_setAssociatedObject(textNode, kApolloAvatarApplyingTextKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    @try {
+        ApolloSetAttributedTextForNode(textNode, updated);
+    } @finally {
+        objc_setAssociatedObject(textNode, kApolloAvatarApplyingTextKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     ApolloNodeSetNeedsLayout(textNode);
     return YES;
 }
@@ -476,10 +506,61 @@ static NSUInteger sApolloInlineAvatarQueuedLogCount = 0;
 static NSUInteger sApolloInlineAvatarAppliedLogCount = 0;
 static NSUInteger sApolloInlineAvatarGaveUpLogCount = 0;
 static NSUInteger sApolloInlineAvatarLateReapplyLogCount = 0;
+static NSUInteger sApolloInlineAvatarRewriteLogCount = 0;
 
 static BOOL ApolloInlineAvatarShouldLog(NSUInteger *counter) {
     if (!counter || *counter >= ApolloInlineAvatarLogLimit) return NO;
     (*counter)++;
+    return YES;
+}
+
+static BOOL ApolloPrepareAvatarRewriteForTextNode(id textNode, NSAttributedString *incomingAttributedText, NSAttributedString **swapOut) {
+    if (swapOut) *swapOut = nil;
+    if (!textNode || !sShowUserAvatars) return NO;
+    if ([objc_getAssociatedObject(textNode, kApolloAvatarApplyingTextKey) boolValue]) return NO;
+    if (![objc_getAssociatedObject(textNode, kApolloAvatarOwnedTextNodeKey) boolValue]) return NO;
+    if (![incomingAttributedText isKindOfClass:[NSAttributedString class]] || incomingAttributedText.length == 0) return NO;
+    if (ApolloTextLooksAvatarPrepended(incomingAttributedText)) return NO;
+
+    NSString *username = ApolloAvatarNormalizedUsername(objc_getAssociatedObject(textNode, kApolloAvatarUsernameKey));
+    if (username.length == 0) {
+        ApolloClearAvatarTextNodeAssociations(textNode);
+        return NO;
+    }
+
+    if (!ApolloAttributedTextContainsUsername(incomingAttributedText, username)) {
+        NSString *trimmed = [incomingAttributedText.string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length > 0) ApolloClearAvatarTextNodeAssociations(textNode);
+        return NO;
+    }
+
+    ApolloUserProfileInfo *info = objc_getAssociatedObject(textNode, kApolloAvatarInfoKey);
+    UIImage *avatarImage = objc_getAssociatedObject(textNode, kApolloAvatarImageKey);
+    UIImage *decoratorImage = objc_getAssociatedObject(textNode, kApolloAvatarDecoratorImageKey);
+    if (!info || !avatarImage) {
+        ApolloUserProfileCache *cache = [ApolloUserProfileCache sharedCache];
+        if (!info) info = [cache cachedInfoForUsername:username];
+        if (!avatarImage && info.iconURL) avatarImage = [cache cachedImageForURL:info.iconURL];
+        if (!decoratorImage && info.decoratorURL) decoratorImage = [cache cachedImageForURL:info.decoratorURL];
+    }
+    if (!info || !avatarImage) return NO;
+
+    NSString *token = ApolloAvatarTokenForInfo(info, avatarImage != nil, decoratorImage != nil);
+    NSAttributedString *updated = ApolloAttributedTextByPrependingAvatar(incomingAttributedText, avatarImage, decoratorImage, info);
+    if (!updated || updated == incomingAttributedText) return NO;
+
+    objc_setAssociatedObject(textNode, kApolloAvatarOriginalAttributedTextKey, incomingAttributedText, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarUsernameKey, username, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarAppliedTokenKey, token, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarInfoKey, info, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarImageKey, avatarImage, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloAvatarDecoratorImageKey, decoratorImage, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    if (swapOut) *swapOut = updated;
+    if (ApolloInlineAvatarShouldLog(&sApolloInlineAvatarRewriteLogCount)) {
+        ApolloLog(@"[UserAvatars] Inline avatar preserved after text rewrite u/%@ node=%p", username, textNode);
+    }
     return YES;
 }
 
@@ -957,6 +1038,58 @@ static void ApolloProfileRefreshControllersForUsername(NSString *username) {
         }
     });
 }
+
+%hook ASTextNode
+
+- (void)setAttributedText:(NSAttributedString *)attributedText {
+    if ([objc_getAssociatedObject(self, kApolloAvatarApplyingTextKey) boolValue]) {
+        %orig;
+        return;
+    }
+
+    NSAttributedString *swap = nil;
+    if (ApolloPrepareAvatarRewriteForTextNode(self, attributedText, &swap)) {
+        objc_setAssociatedObject(self, kApolloAvatarApplyingTextKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        @try {
+            %orig(swap);
+        } @catch (__unused NSException *exception) {
+        } @finally {
+            objc_setAssociatedObject(self, kApolloAvatarApplyingTextKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        ApolloNodeSetNeedsLayout((id)self);
+        return;
+    }
+
+    %orig;
+}
+
+%end
+
+%hook ASTextNode2
+
+- (void)setAttributedText:(NSAttributedString *)attributedText {
+    if ([objc_getAssociatedObject(self, kApolloAvatarApplyingTextKey) boolValue]) {
+        %orig;
+        return;
+    }
+
+    NSAttributedString *swap = nil;
+    if (ApolloPrepareAvatarRewriteForTextNode(self, attributedText, &swap)) {
+        objc_setAssociatedObject(self, kApolloAvatarApplyingTextKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        @try {
+            %orig(swap);
+        } @catch (__unused NSException *exception) {
+        } @finally {
+            objc_setAssociatedObject(self, kApolloAvatarApplyingTextKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        ApolloNodeSetNeedsLayout((id)self);
+        return;
+    }
+
+    %orig;
+}
+
+%end
 
 %hook _TtC6Apollo15CommentCellNode
 
