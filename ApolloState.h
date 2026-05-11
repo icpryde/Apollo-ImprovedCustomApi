@@ -19,6 +19,7 @@ extern NSInteger sReadPostMaxCount;
 extern NSInteger sUnmuteCommentsVideos;
 
 extern BOOL sProxyImgurDDG;
+extern BOOL sShowUserAvatars;
 
 // Image upload host selection. Imgur is the default; Reddit uses Apollo's signed-in
 // session to upload directly to Reddit's media storage.
