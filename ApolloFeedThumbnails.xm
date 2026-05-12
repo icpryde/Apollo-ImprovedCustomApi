@@ -323,10 +323,18 @@ static const void *kFeedThumbPlayBadgeKey   = &kFeedThumbPlayBadgeKey;   // UIIm
 static const void *kFeedThumbCurrentURLKey  = &kFeedThumbCurrentURLKey;  // NSURL *
 static const void *kFeedThumbCurrentTaskKey = &kFeedThumbCurrentTaskKey; // NSURLSessionDataTask *
 static const void *kFeedThumbCurrentLinkIDKey = &kFeedThumbCurrentLinkIDKey; // NSString *
+static const void *kFeedThumbHeaderImageViewKey = &kFeedThumbHeaderImageViewKey; // UIImageView *
+static const void *kFeedThumbHeaderPlayBadgeKey = &kFeedThumbHeaderPlayBadgeKey; // UIImageView *
+static const void *kFeedThumbHeaderCurrentURLKey = &kFeedThumbHeaderCurrentURLKey; // NSURL *
+static const void *kFeedThumbHeaderCurrentTaskKey = &kFeedThumbHeaderCurrentTaskKey; // NSURLSessionDataTask *
+static const void *kFeedThumbHeaderCurrentLinkIDKey = &kFeedThumbHeaderCurrentLinkIDKey; // NSString *
+static const void *kFeedThumbHeaderRetryScheduledKey = &kFeedThumbHeaderRetryScheduledKey; // NSNumber(BOOL)
 static const void *kFeedThumbLastAppliedLinkPtrKey = &kFeedThumbLastAppliedLinkPtrKey; // NSValue *
 static const void *kFeedThumbLastAppliedSizeKey = &kFeedThumbLastAppliedSizeKey; // NSValue(CGSize)
 static const void *kFeedThumbMountedOnPillKey = &kFeedThumbMountedOnPillKey; // NSNumber(BOOL)
 static const void *kFeedThumbPillHiddenSiblingsKey = &kFeedThumbPillHiddenSiblingsKey; // NSArray<UIView *> *
+static const void *kFeedThumbCommentsTopResetKey = &kFeedThumbCommentsTopResetKey; // NSNumber(BOOL)
+static const void *kFeedThumbCommentsInitialOffsetKey = &kFeedThumbCommentsInitialOffsetKey; // NSNumber(CGFloat)
 // Stretch state: the target size we've forced onto richMediaNode (via
 // Texture's preferredSize style) so the pill slot grows to a proper
 // large-mode image card size instead of a ~60pt link pill. Stored on
@@ -340,6 +348,7 @@ static NSString *const kApolloFeedThumbsLinkPointerKey = @"linkPointer";
 // Forward decls for pill-stretch helpers (defined after ApolloFeedThumbClearImageOnCell).
 static void ApolloFeedThumbSetPillStretchTarget(id richMediaNode, CGSize targetSize, id cell);
 static CGSize ApolloFeedThumbPillStretchTargetGet(id richMediaNode);
+static void ApolloFeedThumbApplyCommentsHeaderPoster(id headerCell);
 
 // MARK: - v.redd.it preview-image fetch
 //
@@ -489,6 +498,20 @@ static void ApolloFeedThumbTrackCell(id cell) {
     if (!cell) return;
     @synchronized (ApolloFeedThumbTrackedCells()) {
         [ApolloFeedThumbTrackedCells() addObject:cell];
+    }
+}
+
+static NSHashTable<id> *ApolloFeedThumbTrackedHeaders(void) {
+    static NSHashTable<id> *headers;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ headers = [NSHashTable weakObjectsHashTable]; });
+    return headers;
+}
+
+static void ApolloFeedThumbTrackHeader(id headerCell) {
+    if (!headerCell) return;
+    @synchronized (ApolloFeedThumbTrackedHeaders()) {
+        [ApolloFeedThumbTrackedHeaders() addObject:headerCell];
     }
 }
 
@@ -720,6 +743,7 @@ static void ApolloFeedThumbClearImageOnCell(id cell) {
     if (iv) {
         iv.image = nil;
         iv.hidden = YES;
+        iv.layer.contentsRect = CGRectMake(0, 0, 1, 1);
     }
     UIVisualEffectView *blur = objc_getAssociatedObject(cell, kFeedThumbBlurViewKey);
     if (blur) blur.hidden = YES;
@@ -966,26 +990,61 @@ static BOOL ApolloFeedThumbLinkIsVideoPost(RDKLink *link, NSString *source) {
     return NO;
 }
 
-static void ApolloFeedThumbApplyPlayBadge(id cell, UIView *parent, BOOL show) {
+static BOOL ApolloFeedThumbLinkIsStaticPosterVideo(RDKLink *link, NSString *source) {
+    NSURL *url = nil;
+    @try { url = link.URL; } @catch (__unused id e) {}
+    NSString *host = url.host.lowercaseString;
+    if ([host isEqualToString:@"youtu.be"]) return YES;
+    if ([host hasSuffix:@"youtube.com"]) return YES;
+    if ([host hasSuffix:@"youtube-nocookie.com"]) return YES;
+    if ([host hasSuffix:@"ytimg.com"]) return YES;
+    return [source isEqualToString:@"direct"] && [ApolloFeedThumbURLFromDirectLink(link).host.lowercaseString hasSuffix:@"ytimg.com"];
+}
+
+typedef NS_ENUM(NSInteger, ApolloFeedThumbPlayBadgeStyle) {
+    ApolloFeedThumbPlayBadgeStyleNone = 0,
+    ApolloFeedThumbPlayBadgeStyleCompactCorner,
+    ApolloFeedThumbPlayBadgeStyleLargeCenter,
+};
+
+static void ApolloFeedThumbConfigurePlayBadgeImage(UIImageView *badge, ApolloFeedThumbPlayBadgeStyle style) {
+    if (!badge) return;
+    if (style == ApolloFeedThumbPlayBadgeStyleLargeCenter) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:30 weight:UIImageSymbolWeightSemibold];
+        badge.image = [UIImage systemImageNamed:@"play.fill" withConfiguration:cfg];
+        badge.tintColor = [[UIColor blackColor] colorWithAlphaComponent:0.88];
+        badge.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.82];
+        badge.layer.cornerRadius = 31.0;
+        badge.layer.shadowOpacity = 0.35;
+        badge.layer.shadowRadius = 8.0;
+        badge.layer.shadowOffset = CGSizeMake(0, 2);
+    } else {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold];
+        badge.image = [UIImage systemImageNamed:@"play.circle.fill" withConfiguration:cfg];
+        badge.tintColor = [UIColor whiteColor];
+        badge.backgroundColor = [UIColor clearColor];
+        badge.layer.cornerRadius = 0;
+        badge.layer.shadowOpacity = 0.6;
+        badge.layer.shadowRadius = 2.5;
+        badge.layer.shadowOffset = CGSizeMake(0, 1);
+    }
+}
+
+static void ApolloFeedThumbApplyPlayBadge(id cell, UIView *parent, ApolloFeedThumbPlayBadgeStyle style) {
     UIImageView *badge = objc_getAssociatedObject(cell, kFeedThumbPlayBadgeKey);
-    if (!show) {
+    if (style == ApolloFeedThumbPlayBadgeStyleNone) {
         if (badge) badge.hidden = YES;
         return;
     }
     if (!badge) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold];
-        UIImage *playImg = [UIImage systemImageNamed:@"play.circle.fill" withConfiguration:cfg];
-        badge = [[UIImageView alloc] initWithImage:playImg];
-        badge.tintColor = [UIColor whiteColor];
+        badge = [[UIImageView alloc] initWithFrame:CGRectZero];
         badge.userInteractionEnabled = NO;
         badge.contentMode = UIViewContentModeCenter;
         // Subtle drop shadow so the icon stays readable on bright thumbnails.
         badge.layer.shadowColor = [UIColor blackColor].CGColor;
-        badge.layer.shadowOpacity = 0.6;
-        badge.layer.shadowRadius = 2.5;
-        badge.layer.shadowOffset = CGSizeMake(0, 1);
         objc_setAssociatedObject(cell, kFeedThumbPlayBadgeKey, badge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    ApolloFeedThumbConfigurePlayBadgeImage(badge, style);
     if (badge.superview != parent) {
         [badge removeFromSuperview];
         [parent addSubview:badge];
@@ -993,13 +1052,21 @@ static void ApolloFeedThumbApplyPlayBadge(id cell, UIView *parent, BOOL show) {
         [parent bringSubviewToFront:badge];
     }
     badge.hidden = NO;
-    // Anchor the badge to the bottom-right corner of the thumbnail.
     CGSize parentSize = parent.bounds.size;
-    CGSize badgeSize = CGSizeMake(22, 22);
-    CGFloat margin = 5.0;
-    badge.frame = CGRectMake(parentSize.width  - badgeSize.width  - margin,
-                             parentSize.height - badgeSize.height - margin,
-                             badgeSize.width, badgeSize.height);
+    if (style == ApolloFeedThumbPlayBadgeStyleLargeCenter) {
+        CGFloat side = MIN(68.0, MAX(54.0, parentSize.height * 0.24));
+        badge.layer.cornerRadius = side / 2.0;
+        badge.frame = CGRectMake((parentSize.width - side) / 2.0,
+                                 (parentSize.height - side) / 2.0,
+                                 side, side);
+    } else {
+        // Compact mode keeps the existing small bottom-right badge.
+        CGSize badgeSize = CGSizeMake(22, 22);
+        CGFloat margin = 5.0;
+        badge.frame = CGRectMake(parentSize.width  - badgeSize.width  - margin,
+                                 parentSize.height - badgeSize.height - margin,
+                                 badgeSize.width, badgeSize.height);
+    }
 }
 
 static UIImageView *ApolloFeedThumbEnsureImageView(id cell, UIView *parent) {
@@ -1029,6 +1096,34 @@ static UIImageView *ApolloFeedThumbEnsureImageView(id cell, UIView *parent) {
     }
     iv.frame = parent.bounds;
     return iv;
+}
+
+static void ApolloFeedThumbApplyLargeFeedCropBias(UIImageView *iv, UIImage *image, BOOL enabled) {
+    if (!iv) return;
+    CGRect fullRect = CGRectMake(0, 0, 1, 1);
+    if (!enabled || !image || image.size.width <= 0 || image.size.height <= 0 || iv.bounds.size.width <= 0 || iv.bounds.size.height <= 0) {
+        iv.layer.contentsRect = fullRect;
+        return;
+    }
+
+    CGFloat imageAspect = image.size.width / image.size.height;
+    CGFloat viewAspect = iv.bounds.size.width / iv.bounds.size.height;
+    // Only bias square/portrait-ish images that aspectFill would crop
+    // vertically. Landscape screenshots/videos generally look better with
+    // the normal centered crop.
+    if (imageAspect >= viewAspect || imageAspect > 1.2) {
+        iv.layer.contentsRect = fullRect;
+        return;
+    }
+
+    CGFloat visibleHeight = imageAspect / viewAspect;
+    if (visibleHeight >= 0.98 || visibleHeight <= 0) {
+        iv.layer.contentsRect = fullRect;
+        return;
+    }
+    CGFloat centeredY = (1.0 - visibleHeight) / 2.0;
+    CGFloat biasedY = MIN(centeredY, MAX(0.06, centeredY * 0.45));
+    iv.layer.contentsRect = CGRectMake(0, biasedY, 1, visibleHeight);
 }
 
 static void ApolloFeedThumbApplyToCell(id cell) {
@@ -1264,7 +1359,14 @@ static void ApolloFeedThumbApplyToCell(id cell) {
     if (legacyBlur) legacyBlur.hidden = YES;
 
     BOOL isVideo = ApolloFeedThumbLinkIsVideoPost(link, source);
-    ApolloFeedThumbApplyPlayBadge(cell, thumbView, isVideo);
+    BOOL isStaticPosterVideo = ApolloFeedThumbLinkIsStaticPosterVideo(link, source);
+    ApolloFeedThumbPlayBadgeStyle playStyle = ApolloFeedThumbPlayBadgeStyleNone;
+    if (isVideo) {
+        playStyle = (mountedOnPill && isStaticPosterVideo)
+                    ? ApolloFeedThumbPlayBadgeStyleLargeCenter
+                    : ApolloFeedThumbPlayBadgeStyleCompactCorner;
+    }
+    ApolloFeedThumbApplyPlayBadge(cell, thumbView, playStyle);
 
     // When mounted on the pill, hide the pill's text + leading icon so they
     // don't peek through during the brief image load. Tracked on the cell so
@@ -1276,6 +1378,7 @@ static void ApolloFeedThumbApplyToCell(id cell) {
 
     if ([currentLinkID isEqualToString:linkID] && [currentURL isEqual:fallbackURL] && iv.image) {
         // Same link, same URL, image already loaded — just resync visibility.
+        ApolloFeedThumbApplyLargeFeedCropBias(iv, iv.image, mountedOnPill);
         iv.hidden = NO;
         return;
     }
@@ -1284,6 +1387,7 @@ static void ApolloFeedThumbApplyToCell(id cell) {
     NSURLSessionDataTask *oldTask = objc_getAssociatedObject(cell, kFeedThumbCurrentTaskKey);
     [oldTask cancel];
     iv.image = nil;
+    iv.layer.contentsRect = CGRectMake(0, 0, 1, 1);
     // Pill mount: keep the imageView hidden until the image actually loads,
     // otherwise we'd briefly show an empty rounded rect over the pill. The
     // pill siblings are also hidden, so the cell shows the cell's background
@@ -1322,6 +1426,7 @@ static void ApolloFeedThumbApplyToCell(id cell) {
             if (![nowLinkID isEqualToString:expectedLinkID]) return;
             if (![nowURL isEqual:expectedURL]) return;
             strongIV.image = finalImage;
+            ApolloFeedThumbApplyLargeFeedCropBias(strongIV, finalImage, captureMountedOnPill);
             strongIV.hidden = NO;
             if (captureMountedOnPill && ApolloFeedThumbShouldLogStretchProbe()) {
                 UIView *parent = strongIV.superview;
@@ -1503,16 +1608,313 @@ static void ApolloFeedThumbHideLinkPillIfRedundant(id headerCell) {
     }
 }
 
+static void ApolloFeedThumbClearCommentsHeaderPoster(id headerCell) {
+    UIImageView *iv = objc_getAssociatedObject(headerCell, kFeedThumbHeaderImageViewKey);
+    if (iv) {
+        iv.image = nil;
+        iv.hidden = YES;
+        [iv removeFromSuperview];
+    }
+    UIImageView *badge = objc_getAssociatedObject(headerCell, kFeedThumbHeaderPlayBadgeKey);
+    if (badge) {
+        badge.hidden = YES;
+        [badge removeFromSuperview];
+    }
+    NSURLSessionDataTask *task = objc_getAssociatedObject(headerCell, kFeedThumbHeaderCurrentTaskKey);
+    [task cancel];
+    objc_setAssociatedObject(headerCell, kFeedThumbHeaderCurrentTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(headerCell, kFeedThumbHeaderCurrentURLKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(headerCell, kFeedThumbHeaderCurrentLinkIDKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static UIView *ApolloFeedThumbCommentsHeaderPosterTarget(id headerCell) {
+    id richMedia = ApolloFeedThumbIvarByName(headerCell, "richMediaNode");
+    if (!richMedia) {
+        id crosspost = ApolloFeedThumbIvarByName(headerCell, "crosspostNode");
+        richMedia = crosspost ? ApolloFeedThumbIvarByName(crosspost, "richMediaNode") : nil;
+    }
+    if (!richMedia) return nil;
+
+    id thumbnailNode = ApolloFeedThumbIvarByName(richMedia, "thumbnailNode");
+    UIView *target = ApolloFeedThumbViewForNode(thumbnailNode);
+    if (!target || target.bounds.size.width < 40 || target.bounds.size.height < 40) {
+        target = ApolloFeedThumbViewForNode(richMedia);
+    }
+    if (target.bounds.size.width < 40 || target.bounds.size.height < 40) return nil;
+    return target;
+}
+
+static UIImageView *ApolloFeedThumbEnsureCommentsHeaderImageView(id headerCell, UIView *parent) {
+    UIImageView *iv = objc_getAssociatedObject(headerCell, kFeedThumbHeaderImageViewKey);
+    if (!iv) {
+        iv = [[UIImageView alloc] initWithFrame:parent.bounds];
+        iv.contentMode = UIViewContentModeScaleAspectFill;
+        iv.clipsToBounds = YES;
+        iv.userInteractionEnabled = NO;
+        iv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        iv.backgroundColor = [UIColor clearColor];
+        objc_setAssociatedObject(headerCell, kFeedThumbHeaderImageViewKey, iv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (iv.superview != parent) {
+        [iv removeFromSuperview];
+        [parent addSubview:iv];
+    } else {
+        [parent bringSubviewToFront:iv];
+    }
+    iv.frame = parent.bounds;
+    return iv;
+}
+
+static void ApolloFeedThumbApplyCommentsHeaderPlayBadge(id headerCell, UIView *parent) {
+    UIImageView *badge = objc_getAssociatedObject(headerCell, kFeedThumbHeaderPlayBadgeKey);
+    if (!badge) {
+        badge = [[UIImageView alloc] initWithFrame:CGRectZero];
+        badge.userInteractionEnabled = NO;
+        badge.contentMode = UIViewContentModeCenter;
+        badge.layer.shadowColor = [UIColor blackColor].CGColor;
+        objc_setAssociatedObject(headerCell, kFeedThumbHeaderPlayBadgeKey, badge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    ApolloFeedThumbConfigurePlayBadgeImage(badge, ApolloFeedThumbPlayBadgeStyleLargeCenter);
+    if (badge.superview != parent) {
+        [badge removeFromSuperview];
+        [parent addSubview:badge];
+    } else {
+        [parent bringSubviewToFront:badge];
+    }
+    CGSize parentSize = parent.bounds.size;
+    CGFloat side = MIN(72.0, MAX(58.0, parentSize.height * 0.22));
+    badge.layer.cornerRadius = side / 2.0;
+    badge.frame = CGRectMake((parentSize.width - side) / 2.0,
+                             (parentSize.height - side) / 2.0,
+                             side, side);
+    badge.hidden = NO;
+}
+
+static void ApolloFeedThumbApplyCommentsHeaderPoster(id headerCell) {
+    if (!headerCell) return;
+    RDKLink *link = ApolloFeedThumbLinkFromCell(headerCell);
+    NSURL *linkURL = nil;
+    @try { linkURL = link.URL; } @catch (__unused id e) {}
+    if (ApolloFeedThumbYouTubeID(linkURL).length == 0) {
+        ApolloFeedThumbClearCommentsHeaderPoster(headerCell);
+        return;
+    }
+
+    NSURL *posterURL = ApolloFeedThumbURLFromDirectLink(link);
+    if (!ApolloFeedThumbURLIsUsable(posterURL)) return;
+    UIView *target = ApolloFeedThumbCommentsHeaderPosterTarget(headerCell);
+    if (!target) return;
+
+    NSString *linkID = nil;
+    @try { linkID = link.fullName; } @catch (__unused id e) {}
+    if (linkID.length == 0) linkID = [NSString stringWithFormat:@"%p", link];
+    NSString *currentLinkID = objc_getAssociatedObject(headerCell, kFeedThumbHeaderCurrentLinkIDKey);
+    NSURL *currentURL = objc_getAssociatedObject(headerCell, kFeedThumbHeaderCurrentURLKey);
+
+    UIImageView *iv = ApolloFeedThumbEnsureCommentsHeaderImageView(headerCell, target);
+    ApolloFeedThumbApplyCommentsHeaderPlayBadge(headerCell, target);
+
+    if ([currentLinkID isEqualToString:linkID] && [currentURL isEqual:posterURL] && iv.image) {
+        iv.hidden = NO;
+        return;
+    }
+
+    NSURLSessionDataTask *oldTask = objc_getAssociatedObject(headerCell, kFeedThumbHeaderCurrentTaskKey);
+    [oldTask cancel];
+    iv.image = nil;
+    iv.hidden = YES;
+    objc_setAssociatedObject(headerCell, kFeedThumbHeaderCurrentLinkIDKey, linkID, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(headerCell, kFeedThumbHeaderCurrentURLKey, posterURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloFeedThumbLogOnce(link, @"commentsHeaderYouTube", posterURL);
+
+    __weak id weakHeader = headerCell;
+    __weak UIImageView *weakIV = iv;
+    NSString *expectedLinkID = linkID;
+    NSURL *expectedURL = posterURL;
+    NSURLSessionDataTask *task = [ApolloFeedThumbSharedSession() dataTaskWithURL:posterURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error || data.length == 0) return;
+        UIImage *image = [UIImage imageWithData:data];
+        if (!image) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id strongHeader = weakHeader;
+            UIImageView *strongIV = weakIV;
+            if (!strongHeader || !strongIV) return;
+            NSString *nowLinkID = objc_getAssociatedObject(strongHeader, kFeedThumbHeaderCurrentLinkIDKey);
+            NSURL *nowURL = objc_getAssociatedObject(strongHeader, kFeedThumbHeaderCurrentURLKey);
+            if (![nowLinkID isEqualToString:expectedLinkID]) return;
+            if (![nowURL isEqual:expectedURL]) return;
+            strongIV.image = image;
+            strongIV.hidden = NO;
+            UIView *parent = strongIV.superview;
+            if (parent) ApolloFeedThumbApplyCommentsHeaderPlayBadge(strongHeader, parent);
+        });
+    }];
+    objc_setAssociatedObject(headerCell, kFeedThumbHeaderCurrentTaskKey, task, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [task resume];
+}
+
+static void ApolloFeedThumbScheduleCommentsHeaderPosterRetries(id headerCell) {
+    if (!headerCell) return;
+    if (objc_getAssociatedObject(headerCell, kFeedThumbHeaderRetryScheduledKey)) return;
+    objc_setAssociatedObject(headerCell, kFeedThumbHeaderRetryScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak id weakHeader = headerCell;
+    NSTimeInterval delays[] = {0.15, 0.5, 1.0};
+    for (size_t i = 0; i < sizeof(delays) / sizeof(delays[0]); i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delays[i] * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            id strongHeader = weakHeader;
+            if (strongHeader) ApolloFeedThumbApplyCommentsHeaderPoster(strongHeader);
+        });
+    }
+}
+
 %hook _TtC6Apollo22CommentsHeaderCellNode
 
 - (void)didLoad {
     %orig;
+    ApolloFeedThumbTrackHeader(self);
     ApolloFeedThumbHideLinkPillIfRedundant(self);
+    ApolloFeedThumbApplyCommentsHeaderPoster(self);
+    ApolloFeedThumbScheduleCommentsHeaderPosterRetries(self);
 }
 
 - (void)layout {
     %orig;
     ApolloFeedThumbHideLinkPillIfRedundant(self);
+    ApolloFeedThumbApplyCommentsHeaderPoster(self);
+}
+
+%end
+
+// MARK: - Comments fresh-open offset guard
+
+static BOOL ApolloFeedThumbShouldLogCommentsOffset(void) {
+    static NSUInteger logged = 0;
+    static dispatch_semaphore_t lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = dispatch_semaphore_create(1); });
+    dispatch_semaphore_wait(lock, DISPATCH_TIME_FOREVER);
+    BOOL shouldLog = logged < 30;
+    if (shouldLog) logged++;
+    dispatch_semaphore_signal(lock);
+    return shouldLog;
+}
+
+static UIScrollView *ApolloFeedThumbFindScrollViewInView(UIView *view) {
+    if (!view) return nil;
+    if ([view isKindOfClass:[UIScrollView class]]) return (UIScrollView *)view;
+    for (UIView *subview in view.subviews) {
+        UIScrollView *found = ApolloFeedThumbFindScrollViewInView(subview);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static UIScrollView *ApolloFeedThumbScrollViewFromObject(id object) {
+    if (!object) return nil;
+    if ([object isKindOfClass:[UIScrollView class]]) return (UIScrollView *)object;
+    @try {
+        if ([object respondsToSelector:@selector(view)]) {
+            UIView *view = ((UIView *(*)(id, SEL))objc_msgSend)(object, @selector(view));
+            UIScrollView *scrollView = ApolloFeedThumbFindScrollViewInView(view);
+            if (scrollView) return scrollView;
+        }
+    } @catch (__unused id e) {}
+    if ([object isKindOfClass:[UIView class]]) return ApolloFeedThumbFindScrollViewInView((UIView *)object);
+    return nil;
+}
+
+static UIScrollView *ApolloFeedThumbCommentsScrollView(id commentsVC) {
+    static const char *const kNames[] = {
+        "tableView", "collectionView", "scrollView", "tableNode", "collectionNode",
+        "commentsTableView", "commentsCollectionView", "node"
+    };
+    for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); i++) {
+        UIScrollView *scrollView = ApolloFeedThumbScrollViewFromObject(ApolloFeedThumbIvarByName(commentsVC, kNames[i]));
+        if (scrollView) return scrollView;
+    }
+    return ApolloFeedThumbScrollViewFromObject(commentsVC);
+}
+
+static BOOL ApolloFeedThumbCommentsVCProbablyHasAnchor(id commentsVC) {
+    static const char *const kAnchorNames[] = {
+        "comment", "commentID", "commentFullname", "commentFullName", "commentNode",
+        "startingComment", "highlightedComment", "scrollToComment", "contextComment",
+        "commentPermalink", "initialComment", "focusedComment", "selectedComment"
+    };
+    for (size_t i = 0; i < sizeof(kAnchorNames) / sizeof(kAnchorNames[0]); i++) {
+        id value = ApolloFeedThumbIvarByName(commentsVC, kAnchorNames[i]);
+        if (value) return YES;
+    }
+    return NO;
+}
+
+static CGFloat ApolloFeedThumbScrollViewTopY(UIScrollView *scrollView) {
+    if (!scrollView) return 0;
+    if (@available(iOS 11.0, *)) {
+        return -scrollView.adjustedContentInset.top;
+    }
+    return -scrollView.contentInset.top;
+}
+
+static void ApolloFeedThumbLogCommentsOffset(id commentsVC, NSString *phase, UIScrollView *scrollView, BOOL anchored) {
+    if (!ApolloFeedThumbShouldLogCommentsOffset()) return;
+    RDKLink *link = ApolloFeedThumbLinkFromCell(commentsVC);
+    NSString *title = nil;
+    NSString *fullName = nil;
+    @try { title = link.title; } @catch (__unused id e) {}
+    @try { fullName = link.fullName; } @catch (__unused id e) {}
+    ApolloLog(@"[FeedThumbs] comments offset %@ y=%.1f top=%.1f inset=%@ adjusted=%@ anchored=%@ title='%@' fullName=%@",
+              phase ?: @"?",
+              scrollView ? scrollView.contentOffset.y : 0,
+              scrollView ? ApolloFeedThumbScrollViewTopY(scrollView) : 0,
+              scrollView ? NSStringFromUIEdgeInsets(scrollView.contentInset) : @"nil",
+              scrollView ? NSStringFromUIEdgeInsets(scrollView.adjustedContentInset) : @"nil",
+              anchored ? @"YES" : @"NO",
+              title ?: @"?",
+              fullName ?: @"?");
+}
+
+static void ApolloFeedThumbScheduleCommentsTopResetIfNeeded(id commentsVC) {
+    if (!commentsVC) return;
+    if (objc_getAssociatedObject(commentsVC, kFeedThumbCommentsTopResetKey)) return;
+    UIScrollView *scrollView = ApolloFeedThumbCommentsScrollView(commentsVC);
+    if (!scrollView) return;
+    BOOL anchored = ApolloFeedThumbCommentsVCProbablyHasAnchor(commentsVC);
+    ApolloFeedThumbLogCommentsOffset(commentsVC, @"viewDidAppear", scrollView, anchored);
+    objc_setAssociatedObject(commentsVC, kFeedThumbCommentsInitialOffsetKey, @(scrollView.contentOffset.y), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(commentsVC, kFeedThumbCommentsTopResetKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (anchored) return;
+
+    __weak id weakVC = commentsVC;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        id strongVC = weakVC;
+        if (!strongVC) return;
+        UIScrollView *strongScroll = ApolloFeedThumbCommentsScrollView(strongVC);
+        if (!strongScroll) return;
+        if (ApolloFeedThumbCommentsVCProbablyHasAnchor(strongVC)) return;
+        NSNumber *initialNumber = objc_getAssociatedObject(strongVC, kFeedThumbCommentsInitialOffsetKey);
+        CGFloat initialY = [initialNumber isKindOfClass:[NSNumber class]] ? initialNumber.doubleValue : strongScroll.contentOffset.y;
+        CGFloat currentY = strongScroll.contentOffset.y;
+        CGFloat topY = ApolloFeedThumbScrollViewTopY(strongScroll);
+        ApolloFeedThumbLogCommentsOffset(strongVC, @"delayed", strongScroll, NO);
+        if (currentY > topY + 140.0 && fabs(currentY - initialY) < 2.0) {
+            [strongScroll setContentOffset:CGPointMake(strongScroll.contentOffset.x, topY) animated:NO];
+            ApolloLog(@"[FeedThumbs] comments offset reset to top (from %.1f to %.1f)", currentY, topY);
+        }
+    });
+}
+
+%hook _TtC6Apollo22CommentsViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    UIScrollView *scrollView = ApolloFeedThumbCommentsScrollView(self);
+    ApolloFeedThumbLogCommentsOffset(self, @"viewWillAppear", scrollView, ApolloFeedThumbCommentsVCProbablyHasAnchor(self));
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    ApolloFeedThumbScheduleCommentsTopResetIfNeeded(self);
 }
 
 %end
@@ -1520,7 +1922,8 @@ static void ApolloFeedThumbHideLinkPillIfRedundant(id headerCell) {
 %ctor {
     %init(_TtC6Apollo17LargePostCellNode = objc_getClass("_TtC6Apollo17LargePostCellNode"),
           _TtC6Apollo19CompactPostCellNode = objc_getClass("_TtC6Apollo19CompactPostCellNode"),
-          _TtC6Apollo22CommentsHeaderCellNode = objc_getClass("_TtC6Apollo22CommentsHeaderCellNode"));
+          _TtC6Apollo22CommentsHeaderCellNode = objc_getClass("_TtC6Apollo22CommentsHeaderCellNode"),
+          _TtC6Apollo22CommentsViewController = objc_getClass("_TtC6Apollo22CommentsViewController"));
 
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloFeedThumbsLinkUpdatedNotification
                                                       object:nil
@@ -1539,6 +1942,18 @@ static void ApolloFeedThumbHideLinkPillIfRedundant(id headerCell) {
             RDKLink *cellLink = ApolloFeedThumbLinkFromCell(cell);
             if ((__bridge const void *)cellLink == mutatedLinkPtr) {
                 ApolloFeedThumbApplyToCell(cell);
+            }
+        }
+
+        NSArray *headers = nil;
+        @synchronized (ApolloFeedThumbTrackedHeaders()) {
+            headers = [[ApolloFeedThumbTrackedHeaders() allObjects] copy];
+        }
+        for (id header in headers) {
+            RDKLink *headerLink = ApolloFeedThumbLinkFromCell(header);
+            if ((__bridge const void *)headerLink == mutatedLinkPtr) {
+                ApolloFeedThumbHideLinkPillIfRedundant(header);
+                ApolloFeedThumbApplyCommentsHeaderPoster(header);
             }
         }
     }];
