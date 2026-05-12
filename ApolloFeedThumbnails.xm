@@ -240,6 +240,38 @@ static NSURL *ApolloFeedThumbURLFromDirectLink(RDKLink *link) {
     return nil;
 }
 
+static BOOL ApolloFeedThumbLinkIsSelfPost(RDKLink *link) {
+    @try {
+        if ([(id)link respondsToSelector:@selector(isSelfPost)]) {
+            return link.isSelfPost;
+        }
+    } @catch (__unused NSException *exception) {}
+    return NO;
+}
+
+static BOOL ApolloFeedThumbURLIsDirectRecoverableMedia(NSURL *url) {
+    if (!ApolloFeedThumbURLIsUsable(url)) return NO;
+    if (ApolloFeedThumbIsDirectImageURL(url)) return YES;
+    if (ApolloFeedThumbYouTubeID(url).length > 0) return YES;
+
+    NSString *host = url.host.lowercaseString;
+    if ([host isEqualToString:@"v.redd.it"] || [host hasSuffix:@".v.redd.it"]) return YES;
+    if ([host isEqualToString:@"streamable.com"] || [host hasSuffix:@".streamable.com"]) return YES;
+    if ([host isEqualToString:@"redgifs.com"] || [host hasSuffix:@".redgifs.com"]) return YES;
+    if ([host isEqualToString:@"gfycat.com"] || [host hasSuffix:@".gfycat.com"]) return YES;
+    return NO;
+}
+
+static BOOL ApolloFeedThumbLinkURLIsDirectRecoverableMedia(RDKLink *link) {
+    NSURL *linkURL = nil;
+    @try { linkURL = link.URL; } @catch (__unused NSException *exception) {}
+    return ApolloFeedThumbURLIsDirectRecoverableMedia(linkURL);
+}
+
+static BOOL ApolloFeedThumbShouldSkipSelfPostRecoveredPill(RDKLink *link) {
+    return ApolloFeedThumbLinkIsSelfPost(link) && !ApolloFeedThumbLinkURLIsDirectRecoverableMedia(link);
+}
+
 static NSString *ApolloFeedThumbLogKeyForLink(RDKLink *link, NSString *source) {
     NSString *fullName = nil;
     @try { fullName = link.fullName; } @catch (__unused NSException *exception) {}
@@ -269,6 +301,22 @@ static void ApolloFeedThumbLogOnce(RDKLink *link, NSString *source, NSURL *url) 
     @try { title = link.title; } @catch (__unused NSException *exception) {}
     ApolloLog(@"[FeedThumbs] %@ fallback for r/%@ title='%@' url=%@",
               source ?: @"unknown", subreddit ?: @"?", title ?: @"?", url.absoluteString ?: @"nil");
+}
+
+static void ApolloFeedThumbLogSelfPostSkipOnce(RDKLink *link, NSString *source, NSURL *url) {
+    NSString *skipSource = source.length > 0 ? source : @"unknown";
+    NSString *key = ApolloFeedThumbLogKeyForLink(link, [@"selfPostSkip|" stringByAppendingString:skipSource]);
+    @synchronized (ApolloFeedThumbLoggedKeys()) {
+        if ([ApolloFeedThumbLoggedKeys() containsObject:key]) return;
+        [ApolloFeedThumbLoggedKeys() addObject:key];
+    }
+
+    NSString *subreddit = nil;
+    NSString *title = nil;
+    @try { subreddit = link.subreddit; } @catch (__unused NSException *exception) {}
+    @try { title = link.title; } @catch (__unused NSException *exception) {}
+    ApolloLog(@"[FeedThumbs] pill skipped self-post recovered preview r/%@ url=%@ src=%@ title='%@'",
+              subreddit ?: @"?", url.absoluteString ?: @"nil", source ?: @"unknown", title ?: @"?");
 }
 
 static NSURL *ApolloFeedThumbCachedVRedditPreview(RDKLink *link);
@@ -1435,7 +1483,9 @@ static void ApolloFeedThumbApplyToCell(id cell) {
     NSURL *renderURL = nil;
     if (pillView) {
         NSURL *candidate = fallbackURL ?: (nativeUsable ? nativeURL : nil);
-        if (ApolloFeedThumbURLIsPillCoverable(candidate)) {
+        if (candidate && ApolloFeedThumbShouldSkipSelfPostRecoveredPill(link)) {
+            ApolloFeedThumbLogSelfPostSkipOnce(link, source ?: (nativeUsable ? @"pillThumbnailURL" : @"pillFallback"), candidate);
+        } else if (ApolloFeedThumbURLIsPillCoverable(candidate)) {
             thumbView = pillView;
             renderURL = candidate;
             mountedOnPill = YES;
