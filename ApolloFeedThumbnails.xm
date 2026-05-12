@@ -325,6 +325,8 @@ static const void *kFeedThumbCurrentTaskKey = &kFeedThumbCurrentTaskKey; // NSUR
 static const void *kFeedThumbCurrentLinkIDKey = &kFeedThumbCurrentLinkIDKey; // NSString *
 static const void *kFeedThumbLastAppliedLinkPtrKey = &kFeedThumbLastAppliedLinkPtrKey; // NSValue *
 static const void *kFeedThumbLastAppliedSizeKey = &kFeedThumbLastAppliedSizeKey; // NSValue(CGSize)
+static const void *kFeedThumbMountedOnPillKey = &kFeedThumbMountedOnPillKey; // NSNumber(BOOL)
+static const void *kFeedThumbPillHiddenSiblingsKey = &kFeedThumbPillHiddenSiblingsKey; // NSArray<UIView *> *
 
 NSString *const ApolloFeedThumbsLinkUpdatedNotification = @"ApolloFeedThumbsLinkUpdatedNotification";
 static NSString *const kApolloFeedThumbsLinkPointerKey = @"linkPointer";
@@ -516,6 +518,87 @@ static UIView *ApolloFeedThumbThumbnailViewFromCell(id cell) {
     return nil;
 }
 
+// MARK: - Pill node (large-mode "stuck pill") mount target
+//
+// In LARGE feed mode, Apollo decides at cell-construction time whether to
+// build a `richMediaNode` (rich media area) or a `linkButtonNode` (the redd.it
+// pill) based on the link's *initial* thumbnailURL/previewMedia. When the
+// initial value is empty/placeholder, Apollo locks in the pill — and never
+// rebuilds the cell even after our `setPreviewMedia:` notification later
+// supplies a real URL. So a subset of large-mode posts that we CAN recover
+// URLs for still show a useless pill (e.g. r/Bleach direct image posts whose
+// `thumbnail` came back as "image"/"").
+//
+// To fix this, `ApolloFeedThumbApplyToCell` falls back to mounting our
+// UIImageView on the pill node's view when no thumbnailNode is present and we
+// have a Reddit-hosted recovered URL.
+
+static id ApolloFeedThumbPillNodeFromCell(id cell) {
+    if (!cell) return nil;
+    static const char *const kNames[] = {"linkButtonNode", "linkNode", "linkPreviewNode", "linkBubbleNode"};
+    for (size_t i = 0; i < sizeof(kNames)/sizeof(kNames[0]); i++) {
+        id node = ApolloFeedThumbIvarByName(cell, kNames[i]);
+        if (node) return node;
+    }
+    return nil;
+}
+
+static UIView *ApolloFeedThumbPillViewFromCell(id cell) {
+    id node = ApolloFeedThumbPillNodeFromCell(cell);
+    UIView *v = ApolloFeedThumbViewForNode(node);
+    // Pills are wide and short; require minimum width AND height to avoid
+    // mounting on a degenerate/zero-sized layout pass.
+    if (v && v.bounds.size.width > 40 && v.bounds.size.height > 20) return v;
+    return nil;
+}
+
+// Only mount on the pill when our recovered URL points at a host whose
+// thumbnail represents the actual post content — i.e. Reddit-hosted images,
+// imgur/ytimg posters. Skip arbitrary external link previews where the pill
+// IS the legitimate UI (e.g. note.com, news articles), since Apollo already
+// renders an image card above those pills via native previewMedia handling.
+static BOOL ApolloFeedThumbURLIsPillCoverable(NSURL *url) {
+    if (!ApolloFeedThumbURLIsUsable(url)) return NO;
+    NSString *host = url.host.lowercaseString;
+    if (!host) return NO;
+    if ([host isEqualToString:@"i.redd.it"]) return YES;
+    if ([host isEqualToString:@"preview.redd.it"]) return YES;
+    if ([host hasSuffix:@"redditmedia.com"]) return YES;
+    if ([host hasSuffix:@"external-preview.redd.it"]) return YES;
+    if ([host hasPrefix:@"external-preview"]) return YES;
+    if ([host isEqualToString:@"i.imgur.com"]) return YES;
+    if ([host hasSuffix:@"ytimg.com"]) return YES;
+    return NO;
+}
+
+// When mounted on the pill, hide the pill's existing subviews (icon + URL
+// text) so they don't peek through during the brief image load. Cache the
+// list on the cell so we can restore visibility when we unmount.
+static void ApolloFeedThumbHidePillSiblings(id cell, UIView *pillView, UIImageView *ourIV, UIImageView *ourBadge) {
+    if (!pillView) return;
+    NSMutableArray<UIView *> *hiddenNow = [NSMutableArray array];
+    for (UIView *sub in pillView.subviews) {
+        if (sub == ourIV || sub == ourBadge) continue;
+        if (sub.hidden) continue;
+        sub.hidden = YES;
+        [hiddenNow addObject:sub];
+    }
+    NSArray<UIView *> *prior = objc_getAssociatedObject(cell, kFeedThumbPillHiddenSiblingsKey);
+    NSMutableArray<UIView *> *combined = prior ? [prior mutableCopy] : [NSMutableArray array];
+    for (UIView *v in hiddenNow) {
+        if (![combined containsObject:v]) [combined addObject:v];
+    }
+    objc_setAssociatedObject(cell, kFeedThumbPillHiddenSiblingsKey, combined, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void ApolloFeedThumbRestorePillSiblings(id cell) {
+    NSArray<UIView *> *prior = objc_getAssociatedObject(cell, kFeedThumbPillHiddenSiblingsKey);
+    for (UIView *sub in prior) {
+        if ([sub isKindOfClass:[UIView class]]) sub.hidden = NO;
+    }
+    objc_setAssociatedObject(cell, kFeedThumbPillHiddenSiblingsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static NSURLSession *ApolloFeedThumbSharedSession(void) {
     static NSURLSession *session;
     static dispatch_once_t onceToken;
@@ -569,6 +652,9 @@ static void ApolloFeedThumbClearImageOnCell(id cell) {
     objc_setAssociatedObject(cell, kFeedThumbCurrentTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(cell, kFeedThumbCurrentURLKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(cell, kFeedThumbCurrentLinkIDKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Restore pill text/icon if we had hidden them while mounted on the pill.
+    ApolloFeedThumbRestorePillSiblings(cell);
+    objc_setAssociatedObject(cell, kFeedThumbMountedOnPillKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // MARK: - Spoiler/NSFW gaussian blur
@@ -723,12 +809,6 @@ static void ApolloFeedThumbApplyToCell(id cell) {
         return;
     }
 
-    UIView *thumbView = ApolloFeedThumbThumbnailViewFromCell(cell);
-    if (!thumbView) {
-        // Cell doesn't render a thumbnail slot (text/discussion post). Nothing to do.
-        return;
-    }
-
     // Gate: only inject when the native thumbnail is unusable.
     NSURL *nativeURL = nil;
     @try {
@@ -748,6 +828,40 @@ static void ApolloFeedThumbApplyToCell(id cell) {
         ApolloFeedThumbClearImageOnCell(cell);
         return;
     }
+
+    // Choose mount target. Compact mode: the small `thumbnailNode` square.
+    // Large mode ("stuck pill"): the wide `linkButtonNode` pill, but only
+    // when our recovered URL is from a host whose image represents the post
+    // content (Reddit/imgur/ytimg). External link previews keep their
+    // native pill so we don't paint over legitimate external link cards.
+    UIView *thumbView = ApolloFeedThumbThumbnailViewFromCell(cell);
+    BOOL mountedOnPill = NO;
+    if (!thumbView) {
+        UIView *pillView = ApolloFeedThumbPillViewFromCell(cell);
+        if (pillView && ApolloFeedThumbURLIsPillCoverable(fallbackURL)) {
+            thumbView = pillView;
+            mountedOnPill = YES;
+        }
+    }
+    if (!thumbView) {
+        // Cell doesn't render a thumbnail slot we can mount on (text/discussion
+        // post, or large-mode external pill we shouldn't cover). Clear any
+        // stale state in case this cell was previously reused with media.
+        ApolloFeedThumbClearImageOnCell(cell);
+        return;
+    }
+
+    // If we previously mounted on the pill but this cell now has a real
+    // thumbnailNode (cell reuse / reconfiguration), restore the pill's
+    // hidden subviews on the OLD pill view first.
+    NSNumber *wasMountedOnPillNumber = objc_getAssociatedObject(cell, kFeedThumbMountedOnPillKey);
+    BOOL wasMountedOnPill = wasMountedOnPillNumber.boolValue;
+    if (wasMountedOnPill && !mountedOnPill) {
+        ApolloFeedThumbRestorePillSiblings(cell);
+    }
+    objc_setAssociatedObject(cell, kFeedThumbMountedOnPillKey,
+                             mountedOnPill ? @YES : nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // Cell reuse / link change detection.
     NSString *linkID = nil;
@@ -774,6 +888,14 @@ static void ApolloFeedThumbApplyToCell(id cell) {
     BOOL isVideo = ApolloFeedThumbLinkIsVideoPost(link, source);
     ApolloFeedThumbApplyPlayBadge(cell, thumbView, isVideo);
 
+    // When mounted on the pill, hide the pill's text + leading icon so they
+    // don't peek through during the brief image load. Tracked on the cell so
+    // ApolloFeedThumbClearImageOnCell can restore them on unmount/cell reuse.
+    if (mountedOnPill) {
+        UIImageView *badge = objc_getAssociatedObject(cell, kFeedThumbPlayBadgeKey);
+        ApolloFeedThumbHidePillSiblings(cell, thumbView, iv, badge);
+    }
+
     if ([currentLinkID isEqualToString:linkID] && [currentURL isEqual:fallbackURL] && iv.image) {
         // Same link, same URL, image already loaded — just resync visibility.
         iv.hidden = NO;
@@ -784,7 +906,11 @@ static void ApolloFeedThumbApplyToCell(id cell) {
     NSURLSessionDataTask *oldTask = objc_getAssociatedObject(cell, kFeedThumbCurrentTaskKey);
     [oldTask cancel];
     iv.image = nil;
-    iv.hidden = NO;
+    // Pill mount: keep the imageView hidden until the image actually loads,
+    // otherwise we'd briefly show an empty rounded rect over the pill. The
+    // pill siblings are also hidden, so the cell shows the cell's background
+    // color (matches Apollo's empty-thumbnail loading state).
+    iv.hidden = mountedOnPill ? YES : NO;
 
     objc_setAssociatedObject(cell, kFeedThumbCurrentLinkIDKey, linkID, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(cell, kFeedThumbCurrentURLKey, fallbackURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
