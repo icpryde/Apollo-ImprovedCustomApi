@@ -809,39 +809,100 @@ static void ApolloFeedThumbApplyToCell(id cell) {
         return;
     }
 
-    // Gate: only inject when the native thumbnail is unusable.
+    // Determine mount target up front. If the cell has a real `thumbnailNode`
+    // (compact mode, or large-mode with a small icon slot), Apollo's native
+    // path renders into that slot, so we only inject when its thumbnailURL is
+    // unusable. If the cell has NO thumbnailNode but DOES have a `linkButtonNode`
+    // pill (large-mode "stuck pill" case), Apollo locked in the pill at cell
+    // construction and won't reconsider \u2014 even if `link.thumbnailURL` later
+    // becomes usable, Apollo still shows the pill. So when we're on the pill
+    // path, we render unconditionally as long as we can produce ANY usable URL
+    // (preferring the native thumbnailURL, falling back to our recovery
+    // helper).
+    UIView *thumbView = ApolloFeedThumbThumbnailViewFromCell(cell);
+    BOOL mountedOnPill = NO;
+    UIView *pillView = nil;
+    if (!thumbView) {
+        pillView = ApolloFeedThumbPillViewFromCell(cell);
+        // Diagnostic: per-cell-class one-shot, log when we can't find either
+        // mount target so we can see if ivar names need to change for new
+        // Apollo builds. Only logs once per Class to avoid log spam.
+        if (!pillView) {
+            static NSMutableSet<NSString *> *loggedClasses;
+            static dispatch_once_t onceToken;
+            dispatch_once(&onceToken, ^{ loggedClasses = [NSMutableSet set]; });
+            NSString *clsName = NSStringFromClass(object_getClass(cell));
+            BOOL shouldLog = NO;
+            @synchronized (loggedClasses) {
+                if (![loggedClasses containsObject:clsName]) {
+                    [loggedClasses addObject:clsName];
+                    shouldLog = YES;
+                }
+            }
+            if (shouldLog) {
+                NSMutableArray<NSString *> *ivarNames = [NSMutableArray array];
+                Class probe = object_getClass(cell);
+                while (probe && [NSStringFromClass(probe) containsString:@"Apollo"]) {
+                    unsigned int count = 0;
+                    Ivar *ivars = class_copyIvarList(probe, &count);
+                    for (unsigned int i = 0; i < count; i++) {
+                        const char *n = ivar_getName(ivars[i]);
+                        if (n) [ivarNames addObject:[NSString stringWithUTF8String:n]];
+                    }
+                    if (ivars) free(ivars);
+                    probe = class_getSuperclass(probe);
+                }
+                ApolloLog(@"[FeedThumbs] no mount target on %@ (no thumbnailNode, no pill). ivars=%@",
+                          clsName, [ivarNames componentsJoinedByString:@","]);
+            }
+        }
+    }
+
     NSURL *nativeURL = nil;
     @try {
         if ([(id)link respondsToSelector:@selector(thumbnailURL)]) {
             nativeURL = ((NSURL *(*)(id, SEL))objc_msgSend)((id)link, @selector(thumbnailURL));
         }
     } @catch (__unused id e) {}
-    if (ApolloFeedThumbURLIsUsable(nativeURL)) {
-        // Apollo will draw its own thumbnail. Clear ours if present.
+    BOOL nativeUsable = ApolloFeedThumbURLIsUsable(nativeURL);
+
+    // Compact / thumbnailNode path: defer to Apollo when it has a usable URL.
+    if (thumbView && nativeUsable) {
         ApolloFeedThumbClearImageOnCell(cell);
         return;
     }
 
     NSString *source = nil;
     NSURL *fallbackURL = ApolloFeedThumbFallbackURLForLink(link, &source);
-    if (!fallbackURL) {
-        ApolloFeedThumbClearImageOnCell(cell);
-        return;
+
+    // Pill path: prefer the native thumbnailURL when usable (Apollo just
+    // isn't rendering it); otherwise use the recovered URL. Only mount on
+    // the pill when the URL points at a host whose image represents the
+    // post content (Reddit/imgur/ytimg). External link previews keep their
+    // native pill so we don't paint over legitimate external link cards.
+    NSURL *renderURL = nil;
+    if (pillView) {
+        NSURL *candidate = nativeUsable ? nativeURL : fallbackURL;
+        if (ApolloFeedThumbURLIsPillCoverable(candidate)) {
+            thumbView = pillView;
+            renderURL = candidate;
+            mountedOnPill = YES;
+            if (!source) source = nativeUsable ? @"pillThumbnailURL" : @"pillFallback";
+            ApolloLog(@"[FeedThumbs] pill mount candidate r/%@ url=%@ src=%@",
+                      ({ NSString *_s = nil; @try { _s = link.subreddit; } @catch (__unused id e) {} _s ?: @"?"; }),
+                      candidate.absoluteString ?: @"nil", source);
+        } else if (candidate) {
+            ApolloLog(@"[FeedThumbs] pill skipped (host not coverable) r/%@ url=%@",
+                      ({ NSString *_s = nil; @try { _s = link.subreddit; } @catch (__unused id e) {} _s ?: @"?"; }),
+                      candidate.absoluteString ?: @"nil");
+        }
+    } else {
+        renderURL = fallbackURL;
     }
 
-    // Choose mount target. Compact mode: the small `thumbnailNode` square.
-    // Large mode ("stuck pill"): the wide `linkButtonNode` pill, but only
-    // when our recovered URL is from a host whose image represents the post
-    // content (Reddit/imgur/ytimg). External link previews keep their
-    // native pill so we don't paint over legitimate external link cards.
-    UIView *thumbView = ApolloFeedThumbThumbnailViewFromCell(cell);
-    BOOL mountedOnPill = NO;
-    if (!thumbView) {
-        UIView *pillView = ApolloFeedThumbPillViewFromCell(cell);
-        if (pillView && ApolloFeedThumbURLIsPillCoverable(fallbackURL)) {
-            thumbView = pillView;
-            mountedOnPill = YES;
-        }
+    if (!renderURL) {
+        ApolloFeedThumbClearImageOnCell(cell);
+        return;
     }
     if (!thumbView) {
         // Cell doesn't render a thumbnail slot we can mount on (text/discussion
@@ -850,6 +911,10 @@ static void ApolloFeedThumbApplyToCell(id cell) {
         ApolloFeedThumbClearImageOnCell(cell);
         return;
     }
+    // Downstream code (cell-reuse cache key, image-load completion handler)
+    // uses `fallbackURL` as the canonical URL identifier. Repoint it at the
+    // chosen render URL so the cache key reflects what we actually loaded.
+    fallbackURL = renderURL;
 
     // If we previously mounted on the pill but this cell now has a real
     // thumbnailNode (cell reuse / reconfiguration), restore the pill's
