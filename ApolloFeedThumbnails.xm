@@ -327,19 +327,19 @@ static const void *kFeedThumbLastAppliedLinkPtrKey = &kFeedThumbLastAppliedLinkP
 static const void *kFeedThumbLastAppliedSizeKey = &kFeedThumbLastAppliedSizeKey; // NSValue(CGSize)
 static const void *kFeedThumbMountedOnPillKey = &kFeedThumbMountedOnPillKey; // NSNumber(BOOL)
 static const void *kFeedThumbPillHiddenSiblingsKey = &kFeedThumbPillHiddenSiblingsKey; // NSArray<UIView *> *
-// Stretch state: the target height we've forced onto richMediaNode (via
+// Stretch state: the target size we've forced onto richMediaNode (via
 // Texture's preferredSize style) so the pill slot grows to a proper
-// large-mode image card height instead of a ~60pt link pill. Stored on
+// large-mode image card size instead of a ~60pt link pill. Stored on
 // the *richMediaNode* (not the cell) since style.preferredSize is a
 // per-node attribute and the cell may reuse the same richMediaNode.
-static const void *kFeedThumbStretchTargetKey = &kFeedThumbStretchTargetKey; // NSNumber(CGFloat) on richMediaNode
+static const void *kFeedThumbStretchTargetKey = &kFeedThumbStretchTargetKey; // NSValue(CGSize) on richMediaNode
 
 NSString *const ApolloFeedThumbsLinkUpdatedNotification = @"ApolloFeedThumbsLinkUpdatedNotification";
 static NSString *const kApolloFeedThumbsLinkPointerKey = @"linkPointer";
 
 // Forward decls for pill-stretch helpers (defined after ApolloFeedThumbClearImageOnCell).
-static void ApolloFeedThumbSetPillStretchTarget(id richMediaNode, CGFloat targetHeight, id cell);
-static CGFloat ApolloFeedThumbPillStretchTargetGet(id richMediaNode);
+static void ApolloFeedThumbSetPillStretchTarget(id richMediaNode, CGSize targetSize, id cell);
+static CGSize ApolloFeedThumbPillStretchTargetGet(id richMediaNode);
 
 // MARK: - v.redd.it preview-image fetch
 //
@@ -737,10 +737,10 @@ static void ApolloFeedThumbClearImageOnCell(id cell) {
     // collapse it back so other cell-reuse paths (text post, real media)
     // get the correct intrinsic size.
     id richMediaForReset = ApolloFeedThumbIvarByName(cell, "richMediaNode");
-    if (richMediaForReset) ApolloFeedThumbSetPillStretchTarget(richMediaForReset, 0, cell);
+    if (richMediaForReset) ApolloFeedThumbSetPillStretchTarget(richMediaForReset, CGSizeZero, cell);
     id crossForReset = ApolloFeedThumbIvarByName(cell, "crosspostNode");
     id crossRichForReset = crossForReset ? ApolloFeedThumbIvarByName(crossForReset, "richMediaNode") : nil;
-    if (crossRichForReset) ApolloFeedThumbSetPillStretchTarget(crossRichForReset, 0, cell);
+    if (crossRichForReset) ApolloFeedThumbSetPillStretchTarget(crossRichForReset, CGSizeZero, cell);
 }
 
 // MARK: - Pill stretch
@@ -753,31 +753,50 @@ static void ApolloFeedThumbClearImageOnCell(id cell) {
 // requested space and the cell as a whole grows correspondingly.
 //
 // We:
-//   1. Set richMediaNode.style.preferredSize = (0, targetHeight) — width 0
-//      lets the parent stack spec stretch us full-width as before.
+//   1. Set richMediaNode.style.preferredSize = (targetWidth, targetHeight).
+//      Passing width 0 is unsafe in Texture: it can be interpreted as a
+//      literal zero-width layout, which makes the image disappear.
 //   2. Invalidate richMediaNode's calculated layout.
 //   3. Trigger ASCellNode re-measurement via
 //      transitionLayoutWithAnimation:shouldMeasureAsync:measurementCompletion:
 //      so the collection picks up the new cell height.
 //
-// Reset (passing target == 0) restores CGSizeZero (auto) so cell reuse with
+// Reset (passing CGSizeZero) restores CGSizeZero (auto) so cell reuse with
 // real media or text-only posts gets back the natural layout.
 
-static CGFloat ApolloFeedThumbPillStretchTargetGet(id richMediaNode) {
-    if (!richMediaNode) return 0;
-    NSNumber *n = objc_getAssociatedObject(richMediaNode, kFeedThumbStretchTargetKey);
-    return [n isKindOfClass:[NSNumber class]] ? n.doubleValue : 0;
+static CGSize ApolloFeedThumbPillStretchTargetGet(id richMediaNode) {
+    if (!richMediaNode) return CGSizeZero;
+    NSValue *v = objc_getAssociatedObject(richMediaNode, kFeedThumbStretchTargetKey);
+    return [v isKindOfClass:[NSValue class]] ? v.CGSizeValue : CGSizeZero;
+}
+
+static BOOL ApolloFeedThumbSizeNearlyEqual(CGSize a, CGSize b) {
+    return fabs(a.width - b.width) < 0.5 && fabs(a.height - b.height) < 0.5;
+}
+
+static BOOL ApolloFeedThumbShouldLogStretchProbe(void) {
+    static NSUInteger logged = 0;
+    static dispatch_semaphore_t lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = dispatch_semaphore_create(1); });
+    dispatch_semaphore_wait(lock, DISPATCH_TIME_FOREVER);
+    BOOL shouldLog = logged < 24;
+    if (shouldLog) logged++;
+    dispatch_semaphore_signal(lock);
+    return shouldLog;
 }
 
 // Apply preferredSize on richMediaNode and trigger a relayout on the cell.
 // `cell` may be nil for the reset path (we still need to clear the style).
-static void ApolloFeedThumbSetPillStretchTarget(id richMediaNode, CGFloat targetHeight, id cell) {
+static void ApolloFeedThumbSetPillStretchTarget(id richMediaNode, CGSize targetSize, id cell) {
     if (!richMediaNode) return;
-    CGFloat current = ApolloFeedThumbPillStretchTargetGet(richMediaNode);
-    if (fabs(current - targetHeight) < 0.5) return; // no-op
+    BOOL enabled = targetSize.width > 1.0 && targetSize.height > 1.0;
+    CGSize normalizedTarget = enabled ? targetSize : CGSizeZero;
+    CGSize current = ApolloFeedThumbPillStretchTargetGet(richMediaNode);
+    if (ApolloFeedThumbSizeNearlyEqual(current, normalizedTarget)) return; // no-op
 
     objc_setAssociatedObject(richMediaNode, kFeedThumbStretchTargetKey,
-                             targetHeight > 0 ? @(targetHeight) : nil,
+                             enabled ? [NSValue valueWithCGSize:normalizedTarget] : nil,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // 1. Override intrinsic size via style.preferredSize.
@@ -785,11 +804,29 @@ static void ApolloFeedThumbSetPillStretchTarget(id richMediaNode, CGFloat target
         if ([(id)richMediaNode respondsToSelector:@selector(style)]) {
             id style = ((id (*)(id, SEL))objc_msgSend)(richMediaNode, @selector(style));
             if (style && [style respondsToSelector:@selector(setPreferredSize:)]) {
-                CGSize newSize = (targetHeight > 0) ? CGSizeMake(0, targetHeight) : CGSizeZero;
-                ((void (*)(id, SEL, CGSize))objc_msgSend)(style, @selector(setPreferredSize:), newSize);
+                ((void (*)(id, SEL, CGSize))objc_msgSend)(style, @selector(setPreferredSize:), normalizedTarget);
             }
         }
     } @catch (__unused id e) {}
+
+    BOOL logBefore = enabled && ApolloFeedThumbShouldLogStretchProbe();
+    if (logBefore) {
+        UIView *rmView = nil;
+        UIView *cellView = nil;
+        @try {
+            if ([(id)richMediaNode respondsToSelector:@selector(view)]) {
+                rmView = ((UIView *(*)(id, SEL))objc_msgSend)(richMediaNode, @selector(view));
+            }
+            if (cell && [(id)cell respondsToSelector:@selector(view)]) {
+                cellView = ((UIView *(*)(id, SEL))objc_msgSend)(cell, @selector(view));
+            }
+        } @catch (__unused id e) {}
+        ApolloLog(@"[FeedThumbs] stretch set target=%@ cellBounds=%@ rmFrame=%@ rmBounds=%@",
+                  NSStringFromCGSize(normalizedTarget),
+                  cellView ? NSStringFromCGRect(cellView.bounds) : @"nil",
+                  rmView ? NSStringFromCGRect(rmView.frame) : @"nil",
+                  rmView ? NSStringFromCGRect(rmView.bounds) : @"nil");
+    }
 
     // 2. Invalidate the node's cached layout so it re-measures.
     @try {
@@ -806,6 +843,8 @@ static void ApolloFeedThumbSetPillStretchTarget(id richMediaNode, CGFloat target
     //    a layout pass (Texture asserts on re-entrant transitions).
     if (cell) {
         __weak id weakCell = cell;
+        __weak id weakRichMedia = richMediaNode;
+        BOOL logAfter = logBefore;
         dispatch_async(dispatch_get_main_queue(), ^{
             id strongCell = weakCell;
             if (!strongCell) return;
@@ -817,12 +856,34 @@ static void ApolloFeedThumbSetPillStretchTarget(id richMediaNode, CGFloat target
                     ((void (*)(id, SEL))objc_msgSend)(strongCell, @selector(setNeedsLayout));
                 }
             } @catch (__unused id e) {}
+            if (logAfter) {
+                id strongRichMedia = weakRichMedia;
+                UIView *rmView = nil;
+                UIView *cellView = nil;
+                UIImageView *iv = objc_getAssociatedObject(strongCell, kFeedThumbImageViewKey);
+                @try {
+                    if (strongRichMedia && [(id)strongRichMedia respondsToSelector:@selector(view)]) {
+                        rmView = ((UIView *(*)(id, SEL))objc_msgSend)(strongRichMedia, @selector(view));
+                    }
+                    if ([(id)strongCell respondsToSelector:@selector(view)]) {
+                        cellView = ((UIView *(*)(id, SEL))objc_msgSend)(strongCell, @selector(view));
+                    }
+                } @catch (__unused id e) {}
+                ApolloLog(@"[FeedThumbs] stretch after transition cellFrame=%@ cellBounds=%@ rmFrame=%@ rmBounds=%@ ivFrame=%@ ivHidden=%@ superBounds=%@",
+                          cellView ? NSStringFromCGRect(cellView.frame) : @"nil",
+                          cellView ? NSStringFromCGRect(cellView.bounds) : @"nil",
+                          rmView ? NSStringFromCGRect(rmView.frame) : @"nil",
+                          rmView ? NSStringFromCGRect(rmView.bounds) : @"nil",
+                          iv ? NSStringFromCGRect(iv.frame) : @"nil",
+                          iv ? (iv.hidden ? @"YES" : @"NO") : @"nil",
+                          iv.superview ? NSStringFromCGRect(iv.superview.bounds) : @"nil");
+            }
         });
     }
 
     static dispatch_once_t logToken;
     dispatch_once(&logToken, ^{
-        ApolloLog(@"[FeedThumbs] pill stretch wired: preferredSize→(0,target) + transitionLayoutWithAnimation");
+        ApolloLog(@"[FeedThumbs] pill stretch wired: preferredSize→(width,height) + transitionLayoutWithAnimation");
     });
 }
 
@@ -1158,22 +1219,24 @@ static void ApolloFeedThumbApplyToCell(id cell) {
                     cellW = cv.bounds.size.width;
                 }
             } @catch (__unused id e) {}
-            if (cellW < 200) cellW = pillView.bounds.size.width;
-            if (cellW < 200) cellW = 390;
+            CGFloat pillW = pillView.bounds.size.width;
+            CGFloat targetW = pillW;
+            if (targetW < 200) targetW = cellW;
+            if (targetW < 200) targetW = 390;
             // Aim for ~16:9. Clamp to a band so we don't overwhelm tiny posts
             // or eat the whole screen on iPad.
-            CGFloat targetH = MIN(320.0, MAX(180.0, cellW * 9.0 / 16.0));
-            ApolloFeedThumbSetPillStretchTarget(richMediaForStretch, targetH, cell);
+            CGFloat targetH = MIN(320.0, MAX(180.0, targetW * 9.0 / 16.0));
+            ApolloFeedThumbSetPillStretchTarget(richMediaForStretch, CGSizeMake(targetW, targetH), cell);
         } else {
             // Not on pill — clear stretch on both candidates if previously set.
             id rm = ApolloFeedThumbIvarByName(cell, "richMediaNode");
-            if (rm && ApolloFeedThumbPillStretchTargetGet(rm) > 0) {
-                ApolloFeedThumbSetPillStretchTarget(rm, 0, cell);
+            if (rm && !CGSizeEqualToSize(ApolloFeedThumbPillStretchTargetGet(rm), CGSizeZero)) {
+                ApolloFeedThumbSetPillStretchTarget(rm, CGSizeZero, cell);
             }
             id cross = ApolloFeedThumbIvarByName(cell, "crosspostNode");
             id rmx = cross ? ApolloFeedThumbIvarByName(cross, "richMediaNode") : nil;
-            if (rmx && ApolloFeedThumbPillStretchTargetGet(rmx) > 0) {
-                ApolloFeedThumbSetPillStretchTarget(rmx, 0, cell);
+            if (rmx && !CGSizeEqualToSize(ApolloFeedThumbPillStretchTargetGet(rmx), CGSizeZero)) {
+                ApolloFeedThumbSetPillStretchTarget(rmx, CGSizeZero, cell);
             }
         }
     }
@@ -1238,6 +1301,7 @@ static void ApolloFeedThumbApplyToCell(id cell) {
     NSString *expectedLinkID = linkID;
     NSURL *expectedURL = fallbackURL;
     BOOL captureNeedsBlur = needsBlur;
+    BOOL captureMountedOnPill = mountedOnPill;
 
     NSURLSessionDataTask *task = [ApolloFeedThumbSharedSession() dataTaskWithURL:fallbackURL completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         if (error || data.length == 0) return;
@@ -1259,6 +1323,15 @@ static void ApolloFeedThumbApplyToCell(id cell) {
             if (![nowURL isEqual:expectedURL]) return;
             strongIV.image = finalImage;
             strongIV.hidden = NO;
+            if (captureMountedOnPill && ApolloFeedThumbShouldLogStretchProbe()) {
+                UIView *parent = strongIV.superview;
+                ApolloLog(@"[FeedThumbs] pill image loaded imageSize=%@ ivFrame=%@ ivHidden=%@ superBounds=%@ url=%@",
+                          NSStringFromCGSize(finalImage.size),
+                          NSStringFromCGRect(strongIV.frame),
+                          strongIV.hidden ? @"YES" : @"NO",
+                          parent ? NSStringFromCGRect(parent.bounds) : @"nil",
+                          expectedURL.absoluteString ?: @"nil");
+            }
         });
     }];
     objc_setAssociatedObject(cell, kFeedThumbCurrentTaskKey, task, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
