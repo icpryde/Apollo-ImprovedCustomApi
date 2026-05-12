@@ -533,21 +533,89 @@ static UIView *ApolloFeedThumbThumbnailViewFromCell(id cell) {
 // UIImageView on the pill node's view when no thumbnailNode is present and we
 // have a Reddit-hosted recovered URL.
 
-static id ApolloFeedThumbPillNodeFromCell(id cell) {
-    if (!cell) return nil;
-    static const char *const kNames[] = {"linkButtonNode", "linkNode", "linkPreviewNode", "linkBubbleNode"};
+// In LARGE feed mode, the LargePostCellNode does NOT carry the link pill as
+// a top-level ivar. The pill IS rendered inside `richMediaNode` \u2014 Apollo
+// uses the same `richMediaNode` slot for both real media (image/video card)
+// and the link-button pill, choosing one or the other based on the link's
+// initial thumbnailURL/previewMedia. So we look for the pill BOTH on the
+// cell's top-level ivars (for any cell variant that does expose it
+// directly) AND inside richMediaNode + crosspostNode.richMediaNode.
+//
+// Critically: when richMediaNode is rendering a real image/video card we
+// MUST NOT cover it. The signal is `videoNode` ivar presence \u2014 if
+// richMediaNode has a non-nil `videoNode` (or a `mediaImageNode` / similar),
+// it's rendering real media. Otherwise it's in pill mode and we can mount
+// our recovered thumbnail on top.
+
+static BOOL ApolloFeedThumbRichMediaIsRealMedia(id richMediaNode) {
+    if (!richMediaNode) return NO;
+    // Real media slots populate one of these ivars; pill state leaves them nil.
+    static const char *const kMediaIvars[] = {
+        "videoNode",        // v.redd.it / Streamable / GIF
+        "mediaImageNode",   // direct image render
+        "imageNode",        // alternate image ivar
+        "galleryNode",      // multi-image gallery
+        "playerNode",       // alternate video ivar
+    };
+    for (size_t i = 0; i < sizeof(kMediaIvars)/sizeof(kMediaIvars[0]); i++) {
+        if (ApolloFeedThumbIvarByName(richMediaNode, kMediaIvars[i])) return YES;
+    }
+    return NO;
+}
+
+// Probe a parent (cell OR richMediaNode) for a link-pill subnode by ivar name.
+static id ApolloFeedThumbProbeLinkPillNode(id parent) {
+    if (!parent) return nil;
+    static const char *const kNames[] = {
+        "linkButtonNode", "linkNode", "linkPreviewNode", "linkBubbleNode",
+        "linkButton", "linkPillNode",
+    };
     for (size_t i = 0; i < sizeof(kNames)/sizeof(kNames[0]); i++) {
-        id node = ApolloFeedThumbIvarByName(cell, kNames[i]);
+        id node = ApolloFeedThumbIvarByName(parent, kNames[i]);
         if (node) return node;
     }
+    return nil;
+}
+
+static id ApolloFeedThumbPillNodeFromCell(id cell) {
+    if (!cell) return nil;
+    // 1. Top-level ivar on the cell (rare; works for any cell variant that
+    //    exposes the pill directly).
+    id node = ApolloFeedThumbProbeLinkPillNode(cell);
+    if (node) return node;
+
+    // 2. Inside richMediaNode \u2014 the LargePostCellNode pattern. Only return
+    //    when richMediaNode is NOT in real-media mode, otherwise we'd cover
+    //    a working video/image card.
+    id richMedia = ApolloFeedThumbIvarByName(cell, "richMediaNode");
+    if (richMedia && !ApolloFeedThumbRichMediaIsRealMedia(richMedia)) {
+        node = ApolloFeedThumbProbeLinkPillNode(richMedia);
+        if (node) return node;
+        // If we couldn't resolve a specific pill child node but richMedia is
+        // not real media, fall back to mounting on richMediaNode itself \u2014
+        // that's the slot Apollo would have rendered the pill into.
+        return richMedia;
+    }
+
+    // 3. Inside crosspostNode.richMediaNode \u2014 same pattern for crossposts.
+    id crosspost = ApolloFeedThumbIvarByName(cell, "crosspostNode");
+    id crossRichMedia = crosspost ? ApolloFeedThumbIvarByName(crosspost, "richMediaNode") : nil;
+    if (crossRichMedia && !ApolloFeedThumbRichMediaIsRealMedia(crossRichMedia)) {
+        node = ApolloFeedThumbProbeLinkPillNode(crossRichMedia);
+        if (node) return node;
+        return crossRichMedia;
+    }
+
     return nil;
 }
 
 static UIView *ApolloFeedThumbPillViewFromCell(id cell) {
     id node = ApolloFeedThumbPillNodeFromCell(cell);
     UIView *v = ApolloFeedThumbViewForNode(node);
-    // Pills are wide and short; require minimum width AND height to avoid
-    // mounting on a degenerate/zero-sized layout pass.
+    // Pills (and richMediaNode in pill mode) are wide and short; require
+    // minimum width AND height to avoid mounting on a degenerate/zero-sized
+    // layout pass. richMediaNode in image-card mode is taller \u2014 still
+    // accept it (we already filtered out real-media mode above).
     if (v && v.bounds.size.width > 40 && v.bounds.size.height > 20) return v;
     return nil;
 }
@@ -854,6 +922,29 @@ static void ApolloFeedThumbApplyToCell(id cell) {
                 }
                 ApolloLog(@"[FeedThumbs] no mount target on %@ (no thumbnailNode, no pill). ivars=%@",
                           clsName, [ivarNames componentsJoinedByString:@","]);
+                // Also dump richMediaNode ivars + class so we can see what
+                // child node carries the link pill (and verify our real-media
+                // detection isn't tripping for actual pill cells).
+                id richMedia = ApolloFeedThumbIvarByName(cell, "richMediaNode");
+                if (richMedia) {
+                    NSMutableArray<NSString *> *rmIvars = [NSMutableArray array];
+                    Class rmProbe = object_getClass(richMedia);
+                    NSString *rmCls = NSStringFromClass(rmProbe);
+                    while (rmProbe && [NSStringFromClass(rmProbe) containsString:@"Apollo"]) {
+                        unsigned int rmc = 0;
+                        Ivar *rms = class_copyIvarList(rmProbe, &rmc);
+                        for (unsigned int i = 0; i < rmc; i++) {
+                            const char *n = ivar_getName(rms[i]);
+                            if (n) [rmIvars addObject:[NSString stringWithUTF8String:n]];
+                        }
+                        if (rms) free(rms);
+                        rmProbe = class_getSuperclass(rmProbe);
+                    }
+                    BOOL realMedia = ApolloFeedThumbRichMediaIsRealMedia(richMedia);
+                    ApolloLog(@"[FeedThumbs]   richMediaNode class=%@ realMedia=%@ ivars=%@",
+                              rmCls, realMedia ? @"YES" : @"NO",
+                              [rmIvars componentsJoinedByString:@","]);
+                }
             }
         }
     }
