@@ -584,16 +584,18 @@ static id ApolloFeedThumbPillNodeFromCell(id cell) {
     id node = ApolloFeedThumbProbeLinkPillNode(cell);
     if (node) return node;
 
-    // 2. Inside richMediaNode \u2014 the LargePostCellNode pattern. Only return
-    //    when richMediaNode is NOT in real-media mode, otherwise we'd cover
-    //    a working video/image card.
+    // 2. Inside richMediaNode \u2014 the LargePostCellNode pattern. Apollo's
+    //    richMediaNode is the parent media slot that contains BOTH a
+    //    `linkButtonNode` (the small redd.it pill) AND a `thumbnailNode`
+    //    sibling. We mount on richMediaNode itself (the larger card area)
+    //    rather than on the small linkButtonNode child, otherwise the image
+    //    is squished into pill height (~60pt). The linkButtonNode child
+    //    will be hidden separately by ApolloFeedThumbHidePillSiblings so
+    //    the pill text/icon doesn't show through.
+    //    Only mount when richMediaNode is NOT in real-media mode, otherwise
+    //    we'd cover a working video/image card.
     id richMedia = ApolloFeedThumbIvarByName(cell, "richMediaNode");
     if (richMedia && !ApolloFeedThumbRichMediaIsRealMedia(richMedia)) {
-        node = ApolloFeedThumbProbeLinkPillNode(richMedia);
-        if (node) return node;
-        // If we couldn't resolve a specific pill child node but richMedia is
-        // not real media, fall back to mounting on richMediaNode itself \u2014
-        // that's the slot Apollo would have rendered the pill into.
         return richMedia;
     }
 
@@ -601,8 +603,6 @@ static id ApolloFeedThumbPillNodeFromCell(id cell) {
     id crosspost = ApolloFeedThumbIvarByName(cell, "crosspostNode");
     id crossRichMedia = crosspost ? ApolloFeedThumbIvarByName(crosspost, "richMediaNode") : nil;
     if (crossRichMedia && !ApolloFeedThumbRichMediaIsRealMedia(crossRichMedia)) {
-        node = ApolloFeedThumbProbeLinkPillNode(crossRichMedia);
-        if (node) return node;
         return crossRichMedia;
     }
 
@@ -1119,12 +1119,17 @@ static void ApolloFeedThumbApplyToCell(id cell) {
 - (void)layout {
     %orig;
     // Layout fast-path: skip work when neither the bound link nor the
-    // thumbnail slot size has changed since our last successful apply.
+    // mount-target size has changed since our last successful apply.
     // ApolloFeedThumbApplyToCell still has its own (URL, image-loaded)
     // early-out, but doing the cheap pointer compare here avoids the ivar
-    // walks for `link` / `thumbnailNode` on every layout pass during scrolling.
+    // walks for `link` / `thumbnailNode` / `richMediaNode` on every layout
+    // pass during scrolling. Use whichever target ApolloFeedThumbApplyToCell
+    // would actually mount on (thumbnailNode in compact, richMediaNode in
+    // large pill mode) so pill cells aren't incorrectly skipped because
+    // their thumbnailNode is zero-sized.
     RDKLink *link = ApolloFeedThumbLinkFromCell(self);
     UIView *thumbView = ApolloFeedThumbThumbnailViewFromCell(self);
+    if (!thumbView) thumbView = ApolloFeedThumbPillViewFromCell(self);
     CGSize thumbSize = thumbView ? thumbView.bounds.size : CGSizeZero;
     NSValue *lastPtr = objc_getAssociatedObject(self, kFeedThumbLastAppliedLinkPtrKey);
     NSValue *lastSize = objc_getAssociatedObject(self, kFeedThumbLastAppliedSizeKey);
