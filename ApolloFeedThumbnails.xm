@@ -390,8 +390,6 @@ static const void *kFeedThumbLastAppliedLinkPtrKey = &kFeedThumbLastAppliedLinkP
 static const void *kFeedThumbLastAppliedSizeKey = &kFeedThumbLastAppliedSizeKey; // NSValue(CGSize)
 static const void *kFeedThumbMountedOnPillKey = &kFeedThumbMountedOnPillKey; // NSNumber(BOOL)
 static const void *kFeedThumbPillHiddenSiblingsKey = &kFeedThumbPillHiddenSiblingsKey; // NSArray<UIView *> *
-static const void *kFeedThumbCommentsTopResetKey = &kFeedThumbCommentsTopResetKey; // NSNumber(BOOL)
-static const void *kFeedThumbCommentsInitialOffsetKey = &kFeedThumbCommentsInitialOffsetKey; // NSNumber(CGFloat)
 // Stretch state: the target size we've forced onto richMediaNode (via
 // Texture's preferredSize style) so the pill slot grows to a proper
 // large-mode image card size instead of a ~60pt link pill. Stored on
@@ -2042,159 +2040,10 @@ static void ApolloFeedThumbScheduleCommentsHeaderPosterRetries(id headerCell) {
 
 %end
 
-// MARK: - Comments fresh-open offset guard
-
-static BOOL ApolloFeedThumbShouldLogCommentsOffset(void) {
-    static NSUInteger logged = 0;
-    static dispatch_semaphore_t lock;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ lock = dispatch_semaphore_create(1); });
-    dispatch_semaphore_wait(lock, DISPATCH_TIME_FOREVER);
-    BOOL shouldLog = logged < 30;
-    if (shouldLog) logged++;
-    dispatch_semaphore_signal(lock);
-    return shouldLog;
-}
-
-static UIScrollView *ApolloFeedThumbFindScrollViewInView(UIView *view) {
-    if (!view) return nil;
-    if ([view isKindOfClass:[UIScrollView class]]) return (UIScrollView *)view;
-    for (UIView *subview in view.subviews) {
-        UIScrollView *found = ApolloFeedThumbFindScrollViewInView(subview);
-        if (found) return found;
-    }
-    return nil;
-}
-
-static UIScrollView *ApolloFeedThumbScrollViewFromObject(id object) {
-    if (!object) return nil;
-    if ([object isKindOfClass:[UIScrollView class]]) return (UIScrollView *)object;
-    @try {
-        if ([object respondsToSelector:@selector(view)]) {
-            UIView *view = ((UIView *(*)(id, SEL))objc_msgSend)(object, @selector(view));
-            UIScrollView *scrollView = ApolloFeedThumbFindScrollViewInView(view);
-            if (scrollView) return scrollView;
-        }
-    } @catch (__unused id e) {}
-    if ([object isKindOfClass:[UIView class]]) return ApolloFeedThumbFindScrollViewInView((UIView *)object);
-    return nil;
-}
-
-static UIScrollView *ApolloFeedThumbCommentsScrollView(id commentsVC) {
-    static const char *const kNames[] = {
-        "tableView", "collectionView", "scrollView", "tableNode", "collectionNode",
-        "commentsTableView", "commentsCollectionView", "node"
-    };
-    for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); i++) {
-        UIScrollView *scrollView = ApolloFeedThumbScrollViewFromObject(ApolloFeedThumbIvarByName(commentsVC, kNames[i]));
-        if (scrollView) return scrollView;
-    }
-    return ApolloFeedThumbScrollViewFromObject(commentsVC);
-}
-
-static BOOL ApolloFeedThumbCommentsVCProbablyHasAnchor(id commentsVC) {
-    static const char *const kAnchorNames[] = {
-        "comment", "commentID", "commentFullname", "commentFullName", "commentNode",
-        "startingComment", "highlightedComment", "scrollToComment", "contextComment",
-        "commentPermalink", "initialComment", "focusedComment", "selectedComment"
-    };
-    for (size_t i = 0; i < sizeof(kAnchorNames) / sizeof(kAnchorNames[0]); i++) {
-        id value = ApolloFeedThumbIvarByName(commentsVC, kAnchorNames[i]);
-        if (value) return YES;
-    }
-    return NO;
-}
-
-static CGFloat ApolloFeedThumbScrollViewTopY(UIScrollView *scrollView) {
-    if (!scrollView) return 0;
-    if (@available(iOS 11.0, *)) {
-        return -scrollView.adjustedContentInset.top;
-    }
-    return -scrollView.contentInset.top;
-}
-
-static void ApolloFeedThumbLogCommentsOffset(id commentsVC, NSString *phase, UIScrollView *scrollView, BOOL anchored) {
-    if (!ApolloFeedThumbShouldLogCommentsOffset()) return;
-    RDKLink *link = ApolloFeedThumbLinkFromCell(commentsVC);
-    NSString *title = nil;
-    NSString *fullName = nil;
-    @try { title = link.title; } @catch (__unused id e) {}
-    @try { fullName = link.fullName; } @catch (__unused id e) {}
-    ApolloLog(@"[FeedThumbs] comments offset %@ y=%.1f top=%.1f inset=%@ adjusted=%@ anchored=%@ title='%@' fullName=%@",
-              phase ?: @"?",
-              scrollView ? scrollView.contentOffset.y : 0,
-              scrollView ? ApolloFeedThumbScrollViewTopY(scrollView) : 0,
-              scrollView ? NSStringFromUIEdgeInsets(scrollView.contentInset) : @"nil",
-              scrollView ? NSStringFromUIEdgeInsets(scrollView.adjustedContentInset) : @"nil",
-              anchored ? @"YES" : @"NO",
-              title ?: @"?",
-              fullName ?: @"?");
-}
-
-static void ApolloFeedThumbTryResetCommentsTop(id commentsVC, NSString *phase) {
-    if (!commentsVC) return;
-    UIScrollView *scrollView = ApolloFeedThumbCommentsScrollView(commentsVC);
-    if (!scrollView) return;
-    if (ApolloFeedThumbCommentsVCProbablyHasAnchor(commentsVC)) return;
-    if (scrollView.tracking || scrollView.dragging || scrollView.decelerating) return;
-
-    NSNumber *initialNumber = objc_getAssociatedObject(commentsVC, kFeedThumbCommentsInitialOffsetKey);
-    CGFloat initialY = [initialNumber isKindOfClass:[NSNumber class]] ? initialNumber.doubleValue : scrollView.contentOffset.y;
-    CGFloat currentY = scrollView.contentOffset.y;
-    CGFloat topY = ApolloFeedThumbScrollViewTopY(scrollView);
-    ApolloFeedThumbLogCommentsOffset(commentsVC, phase ?: @"delayed", scrollView, NO);
-
-    BOOL startedNearTop = initialY <= topY + 64.0;
-    BOOL stayedAtInitialOffset = fabs(currentY - initialY) < 2.0;
-    if (currentY > topY + 64.0 && (startedNearTop || stayedAtInitialOffset)) {
-        [scrollView setContentOffset:CGPointMake(scrollView.contentOffset.x, topY) animated:NO];
-        ApolloLog(@"[FeedThumbs] comments offset reset to top (from %.1f to %.1f, phase=%@)", currentY, topY, phase ?: @"delayed");
-    }
-}
-
-static void ApolloFeedThumbScheduleCommentsTopResetIfNeeded(id commentsVC) {
-    if (!commentsVC) return;
-    if (objc_getAssociatedObject(commentsVC, kFeedThumbCommentsTopResetKey)) return;
-    UIScrollView *scrollView = ApolloFeedThumbCommentsScrollView(commentsVC);
-    if (!scrollView) return;
-    BOOL anchored = ApolloFeedThumbCommentsVCProbablyHasAnchor(commentsVC);
-    ApolloFeedThumbLogCommentsOffset(commentsVC, @"viewDidAppear", scrollView, anchored);
-    objc_setAssociatedObject(commentsVC, kFeedThumbCommentsInitialOffsetKey, @(scrollView.contentOffset.y), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(commentsVC, kFeedThumbCommentsTopResetKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (anchored) return;
-
-    __weak id weakVC = commentsVC;
-    NSArray<NSNumber *> *delays = @[ @0.12, @0.35, @0.75 ];
-    for (NSNumber *delay in delays) {
-        NSTimeInterval interval = delay.doubleValue;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(interval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            id strongVC = weakVC;
-            if (!strongVC) return;
-            ApolloFeedThumbTryResetCommentsTop(strongVC, @"delayed");
-        });
-    }
-}
-
-%hook _TtC6Apollo22CommentsViewController
-
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    UIScrollView *scrollView = ApolloFeedThumbCommentsScrollView(self);
-    ApolloFeedThumbLogCommentsOffset(self, @"viewWillAppear", scrollView, ApolloFeedThumbCommentsVCProbablyHasAnchor(self));
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    ApolloFeedThumbScheduleCommentsTopResetIfNeeded(self);
-}
-
-%end
-
 %ctor {
     %init(_TtC6Apollo17LargePostCellNode = objc_getClass("_TtC6Apollo17LargePostCellNode"),
           _TtC6Apollo19CompactPostCellNode = objc_getClass("_TtC6Apollo19CompactPostCellNode"),
-          _TtC6Apollo22CommentsHeaderCellNode = objc_getClass("_TtC6Apollo22CommentsHeaderCellNode"),
-          _TtC6Apollo22CommentsViewController = objc_getClass("_TtC6Apollo22CommentsViewController"));
+          _TtC6Apollo22CommentsHeaderCellNode = objc_getClass("_TtC6Apollo22CommentsHeaderCellNode"));
 
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloFeedThumbsLinkUpdatedNotification
                                                       object:nil
