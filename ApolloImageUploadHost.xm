@@ -206,6 +206,42 @@ static NSRegularExpression *ApolloRedditUploadedMediaURLRegex(void) {
     return regex;
 }
 
+static NSRegularExpression *ApolloRedditDisplayMediaURLRegex(void) {
+    static NSRegularExpression *regex;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        regex = [[NSRegularExpression alloc]
+                 initWithPattern:@"https://(?:preview|i)\\.redd\\.it/[^\\s\\])<>]+"
+                         options:0
+                           error:nil];
+    });
+    return regex;
+}
+
+static NSRegularExpression *ApolloRedditProcessingImageRegex(void) {
+    static NSRegularExpression *regex;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        regex = [[NSRegularExpression alloc]
+                 initWithPattern:@"\\*?Processing img [A-Za-z0-9_-]+\\.\\.\\.\\*?"
+                         options:NSRegularExpressionCaseInsensitive
+                           error:nil];
+    });
+    return regex;
+}
+
+static NSString *ApolloStringByReplacingRegexMatches(NSString *source, NSRegularExpression *regex, NSString *replacement) {
+    if (source.length == 0 || !regex || replacement.length == 0) return source;
+    NSArray<NSTextCheckingResult *> *matches = [regex matchesInString:source options:0 range:NSMakeRange(0, source.length)];
+    if (matches.count == 0) return source;
+
+    NSMutableString *rewritten = [source mutableCopy];
+    for (NSTextCheckingResult *match in [matches reverseObjectEnumerator]) {
+        [rewritten replaceCharactersInRange:match.range withString:replacement];
+    }
+    return rewritten;
+}
+
 static NSString *ApolloFirstRedditUploadedMediaURLInString(NSString *text) {
     if (!ApolloStringContainsRedditUploadedMedia(text)) return nil;
     NSRegularExpression *regex = ApolloRedditUploadedMediaURLRegex();
@@ -802,21 +838,96 @@ static NSString *ApolloCanonicalDisplayURLForRedditMedia(NSString *assetID, NSSt
     return ApolloRedditMediaURLByStrippingQuery(decoded);
 }
 
+static NSString *ApolloCommentDisplayBodyByMergingMediaURL(NSString *body, NSString *mediaURL) {
+    if (mediaURL.length == 0) return body;
+    NSString *source = [body isKindOfClass:[NSString class]] ? body : @"";
+    if (source.length == 0) return mediaURL;
+
+    NSString *rewritten = source;
+    rewritten = ApolloStringByReplacingRegexMatches(rewritten, ApolloRedditUploadedMediaURLRegex(), mediaURL);
+    rewritten = ApolloStringByReplacingRegexMatches(rewritten, ApolloRedditProcessingImageRegex(), mediaURL);
+    rewritten = ApolloStringByReplacingRegexMatches(rewritten, ApolloRedditDisplayMediaURLRegex(), mediaURL);
+
+    if (![rewritten isEqualToString:source]) return rewritten.length > 0 ? rewritten : mediaURL;
+    if ([source containsString:mediaURL]) return source;
+
+    return [NSString stringWithFormat:@"%@\n\n%@", mediaURL, source];
+}
+
+static NSArray<NSString *> *ApolloPlainParagraphsFromCommentBody(NSString *body) {
+    if (body.length == 0) return @[];
+
+    NSMutableArray<NSString *> *paragraphs = [NSMutableArray array];
+    NSMutableString *currentParagraph = [NSMutableString string];
+    NSArray<NSString *> *lines = [body componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSCharacterSet *blankSet = [NSCharacterSet whitespaceCharacterSet];
+
+    void (^flushParagraph)(void) = ^{
+        NSString *paragraph = [currentParagraph copy];
+        paragraph = [paragraph stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (paragraph.length > 0) [paragraphs addObject:paragraph];
+        [currentParagraph setString:@""];
+    };
+
+    for (NSString *line in lines) {
+        NSString *trimmedLine = [line stringByTrimmingCharactersInSet:blankSet];
+        if (trimmedLine.length == 0) {
+            flushParagraph();
+            continue;
+        }
+        if (currentParagraph.length > 0) [currentParagraph appendString:@"\n"];
+        [currentParagraph appendString:line];
+    }
+    flushParagraph();
+    return paragraphs;
+}
+
+static NSString *ApolloSingleMediaURLFromParagraph(NSString *paragraph) {
+    NSString *trimmed = [paragraph stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (ApolloStringIsRedditDisplayMediaURL(trimmed)) return trimmed;
+    NSRegularExpression *regex = ApolloRedditDisplayMediaURLRegex();
+    NSTextCheckingResult *match = [regex firstMatchInString:trimmed options:0 range:NSMakeRange(0, trimmed.length)];
+    if (match && match.range.location == 0 && NSMaxRange(match.range) == trimmed.length) {
+        return [trimmed substringWithRange:match.range];
+    }
+    return nil;
+}
+
+static NSString *ApolloHTMLForPlainCommentDisplayBody(NSString *body, NSString *mediaURL) {
+    NSString *displayBody = body.length > 0 ? body : mediaURL;
+    NSArray<NSString *> *paragraphs = ApolloPlainParagraphsFromCommentBody(displayBody);
+    if (paragraphs.count == 0 && mediaURL.length > 0) paragraphs = @[ mediaURL ];
+
+    NSMutableString *html = [NSMutableString stringWithString:@"<div class=\"md\">"];
+    for (NSString *paragraph in paragraphs) {
+        NSString *singleMediaURL = ApolloSingleMediaURLFromParagraph(paragraph);
+        if (singleMediaURL.length > 0) {
+            NSString *escapedURL = ApolloHTMLEscapedString(singleMediaURL);
+            NSString *visible = ApolloDecodedRedditMediaURLString(singleMediaURL) ?: singleMediaURL;
+            visible = ApolloHTMLEscapedString(visible);
+            [html appendFormat:@"<p><a href=\"%@\">%@</a></p>\n", escapedURL, visible.length > 0 ? visible : escapedURL];
+        } else {
+            NSString *escapedText = ApolloHTMLEscapedString(paragraph);
+            escapedText = [escapedText stringByReplacingOccurrencesOfString:@"\n" withString:@"<br />\n"];
+            [html appendFormat:@"<p>%@</p>\n", escapedText];
+        }
+    }
+    [html appendString:@"</div>"];
+    return html;
+}
+
 static void ApolloPopulateRedditCommentDisplayBody(NSMutableDictionary *comment, NSString *mediaURL) {
     if (mediaURL.length == 0) return;
 
     NSString *body = [comment[@"body"] isKindOfClass:[NSString class]] ? comment[@"body"] : nil;
-    BOOL replaceBody = body.length == 0 || [body containsString:@"Processing img "] || ApolloStringContainsRedditUploadedMedia(body) || ApolloStringIsRedditDisplayMediaURL(body);
-    if (replaceBody) comment[@"body"] = mediaURL;
+    NSString *displayBody = ApolloCommentDisplayBodyByMergingMediaURL(body, mediaURL);
+    BOOL changedBody = displayBody.length > 0 && ![displayBody isEqualToString:(body ?: @"")];
+    if (changedBody) comment[@"body"] = displayBody;
 
     NSString *bodyHTML = [comment[@"body_html"] isKindOfClass:[NSString class]] ? comment[@"body_html"] : nil;
-    if (bodyHTML.length == 0 || [bodyHTML containsString:@"Processing img "] || ApolloStringContainsRedditUploadedMedia(bodyHTML)
+    if (bodyHTML.length == 0 || changedBody || [bodyHTML containsString:@"Processing img "] || ApolloStringContainsRedditUploadedMedia(bodyHTML)
         || ApolloStringIsRedditDisplayMediaURL(bodyHTML) || [bodyHTML containsString:@"preview.redd.it/"] || [bodyHTML containsString:@"i.redd.it/"]) {
-        NSString *escaped = ApolloHTMLEscapedString(mediaURL);
-        NSString *visible = ApolloDecodedRedditMediaURLString(mediaURL);
-        visible = [visible stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"];
-        visible = [visible stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
-        comment[@"body_html"] = [NSString stringWithFormat:@"<div class=\"md\"><p><a href=\"%@\">%@</a></p>\n</div>", escaped, visible.length > 0 ? visible : escaped];
+        comment[@"body_html"] = ApolloHTMLForPlainCommentDisplayBody(displayBody ?: mediaURL, mediaURL);
     }
 }
 
