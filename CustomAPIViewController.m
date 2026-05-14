@@ -178,7 +178,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (NSString *)imageUploadProviderText {
+- (NSString *)mediaUploadProviderText {
     switch (sImageUploadProvider) {
         case ImageUploadProviderReddit: return @"Reddit";
         case ImageUploadProviderImgur:
@@ -197,8 +197,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)presentImageUploadProviderSheetFromSourceView:(UIView *)sourceView {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Image Upload Host"
-                                                                   message:@"Where to upload images attached to posts and comments."
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Media Upload Host"
+                                                                   message:@"Where to upload media attached to posts and comments."
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
 
     NSString *imgurTitle = (sImageUploadProvider == ImageUploadProviderImgur) ? @"Imgur (Current)" : @"Imgur";
@@ -580,8 +580,8 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             }
-            cell.textLabel.text = @"Image Upload Host";
-            cell.detailTextLabel.text = [self imageUploadProviderText];
+            cell.textLabel.text = @"Media Upload Host";
+            cell.detailTextLabel.text = [self mediaUploadProviderText];
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
@@ -752,7 +752,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:plainAttrs]];
     } else if (section == SectionMedia) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Image Upload Host selects where Apollo uploads images attached to posts and comments. \"Reddit\" is experimental and does not support multi-image or video uploads.\n\nProxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy."
+            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments. \"Reddit\" is experimental and supports Reddit-hosted images, image comments, galleries, and single-video posts.\n\nProxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy."
             attributes:plainAttrs];
     } else {
         return nil;
