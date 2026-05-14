@@ -848,12 +848,52 @@ static NSString *ApolloRedditExtractLinkIDFromPostURL(NSString *urlString) {
     if (![host isEqualToString:@"reddit.com"] && ![host hasSuffix:@".reddit.com"]) return nil;
     NSArray<NSString *> *parts = components.path.pathComponents;
     for (NSUInteger i = 0; i + 1 < parts.count; i++) {
-        if ([parts[i] isEqualToString:@"comments"]) {
+        if ([parts[i] isEqualToString:@"comments"] || [parts[i] isEqualToString:@"gallery"]) {
             NSString *id_ = parts[i + 1];
             return id_.length > 0 ? id_ : nil;
         }
     }
     return nil;
+}
+
+static BOOL ApolloRedditPostURLIsGalleryURL(NSString *urlString) {
+    if (urlString.length == 0) return NO;
+    NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+    NSString *host = components.host.lowercaseString;
+    if (![host isEqualToString:@"reddit.com"] && ![host hasSuffix:@".reddit.com"]) return NO;
+    return [components.path.pathComponents containsObject:@"gallery"];
+}
+
+static NSString *ApolloRedditSlugForTitle(NSString *title) {
+    if (![title isKindOfClass:[NSString class]] || title.length == 0) return @"post";
+    NSMutableString *slug = [NSMutableString string];
+    BOOL lastWasSeparator = NO;
+    NSString *lowercaseTitle = title.lowercaseString;
+    for (NSUInteger i = 0; i < lowercaseTitle.length; i++) {
+        unichar ch = [lowercaseTitle characterAtIndex:i];
+        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+            [slug appendFormat:@"%C", ch];
+            lastWasSeparator = NO;
+        } else if (!lastWasSeparator && slug.length > 0) {
+            [slug appendString:@"_"];
+            lastWasSeparator = YES;
+        }
+    }
+    while ([slug hasSuffix:@"_"]) [slug deleteCharactersInRange:NSMakeRange(slug.length - 1, 1)];
+    return slug.length > 0 ? slug : @"post";
+}
+
+static NSString *ApolloRedditCanonicalCommentsURLForLinkID(NSString *linkID, NSDictionary *context) {
+    if (linkID.length == 0) return nil;
+    NSString *bareID = [linkID hasPrefix:@"t3_"] ? [linkID substringFromIndex:3] : linkID;
+    NSString *subreddit = [context[@"subreddit"] isKindOfClass:[NSString class]] ? context[@"subreddit"] : nil;
+    NSString *title = [context[@"title"] isKindOfClass:[NSString class]] ? context[@"title"] : nil;
+    NSString *slug = ApolloRedditSlugForTitle(title);
+    if (subreddit.length > 0) {
+        NSString *escapedSubreddit = [subreddit stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]] ?: subreddit;
+        return [NSString stringWithFormat:@"https://reddit.com/r/%@/comments/%@/%@/", escapedSubreddit, bareID, slug];
+    }
+    return [NSString stringWithFormat:@"https://reddit.com/comments/%@/%@/", bareID, slug];
 }
 
 static NSString *ApolloRedditExtractLinkIDFromWebsocketJSON(id json) {
@@ -1045,6 +1085,9 @@ static NSData *ApolloRedditSynthesizeSubmitSuccessResponseData(NSString *linkID,
     NSString *fullName = [linkID hasPrefix:@"t3_"] ? linkID : [@"t3_" stringByAppendingString:linkID];
     NSString *bareID = [linkID hasPrefix:@"t3_"] ? [linkID substringFromIndex:3] : linkID;
     NSString *url = postURL.length > 0 ? postURL : ApolloRedditUploadFallbackURLForAssetID(context[@"assetID"]);
+    if (ApolloRedditPostURLIsGalleryURL(url)) {
+        url = ApolloRedditCanonicalCommentsURLForLinkID(linkID, context) ?: url;
+    }
 
     NSMutableDictionary *data = [NSMutableDictionary dictionary];
     data[@"id"] = bareID;
@@ -1054,6 +1097,18 @@ static NSData *ApolloRedditSynthesizeSubmitSuccessResponseData(NSString *linkID,
 
     NSDictionary *root = @{ @"json": @{ @"errors": @[], @"data": data } };
     return [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
+}
+
+static NSString *ApolloRedditSubmitResponseDirectURL(NSData *data) {
+    if (data.length == 0) return nil;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *root = [json isKindOfClass:[NSDictionary class]] ? json : nil;
+    NSDictionary *jsonDict = [root[@"json"] isKindOfClass:[NSDictionary class]] ? root[@"json"] : nil;
+    NSArray *errors = [jsonDict[@"errors"] isKindOfClass:[NSArray class]] ? jsonDict[@"errors"] : nil;
+    if (errors.count > 0) return nil;
+    NSDictionary *dataDict = [jsonDict[@"data"] isKindOfClass:[NSDictionary class]] ? jsonDict[@"data"] : nil;
+    NSString *url = [dataDict[@"url"] isKindOfClass:[NSString class]] ? dataDict[@"url"] : nil;
+    return url.length > 0 ? url : nil;
 }
 
 // Pulls the websocket URL and user-submitted-page out of Reddit's image-submit response.
@@ -1081,6 +1136,18 @@ static NSDictionary *ApolloRedditParseSubmitResponseLinks(NSData *data) {
 void ApolloRedditTransformSubmitResponseAsync(NSData *originalData, NSURLRequest *originalRequest, ApolloRedditResponseDataCompletion completion) {
     NSDictionary *context = ApolloRedditMediaSubmitContextFromRequest(originalRequest);
     if (!context) { completion(originalData); return; }
+
+    NSString *directURL = ApolloRedditSubmitResponseDirectURL(originalData);
+    NSString *directLinkID = ApolloRedditPostURLIsGalleryURL(directURL) ? ApolloRedditExtractLinkIDFromPostURL(directURL) : nil;
+    if (directLinkID.length > 0) {
+        NSString *commentsURL = ApolloRedditCanonicalCommentsURLForLinkID(directLinkID, context);
+        NSData *synth = ApolloRedditSynthesizeSubmitSuccessResponseData(directLinkID, commentsURL, context);
+        if (synth.length > 0) {
+            ApolloLog(@"[RedditUpload] Normalized gallery submit success response (linkID=%@, url=%@)", directLinkID, commentsURL ?: @"(missing)");
+            completion(synth);
+            return;
+        }
+    }
 
     NSDictionary *links = ApolloRedditParseSubmitResponseLinks(originalData);
     if (!links) { completion(originalData); return; }

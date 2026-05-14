@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-- Fix Reddit-hosted multi-image photo posts by submitting them as native Reddit galleries instead of Imgur albums.
+- Fix Reddit-hosted multi-image photo posts by submitting them as native Reddit galleries instead of Imgur albums, then routing Apollo to the posted comments permalink after success.
 
 ## [v2.10.0] - 2026-05-12
 
