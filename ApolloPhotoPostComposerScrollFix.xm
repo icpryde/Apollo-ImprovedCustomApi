@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 
 #import "ApolloCommon.h"
+#import "ApolloState.h"
 #import "fishhook.h"
 
 @class PHAssetCollection;
@@ -71,6 +72,7 @@ static char kApolloMediaComposerPosterPayloadContextKey;
 static NSData *(*orig_UIImageJPEGRepresentation)(UIImage *image, CGFloat compressionQuality) = NULL;
 static NSData *(*orig_UIImagePNGRepresentation)(UIImage *image) = NULL;
 
+static BOOL ApolloMediaComposerRedditUploadSelected(void);
 static BOOL ApolloMediaComposerShouldWidenPicker(void);
 
 static NSObject *ApolloMediaComposerVideoBridgeLock(void) {
@@ -214,6 +216,8 @@ static NSMutableDictionary *ApolloMediaComposerConsumeContextLocked(NSMutableDic
 }
 
 extern "C" NSDictionary *ApolloMediaComposerConsumePendingVideoUploadContext(NSData *posterData, NSURL *posterFileURL) {
+    if (!ApolloMediaComposerRedditUploadSelected()) return nil;
+
     NSMutableDictionary *associatedContext = objc_getAssociatedObject(posterData, &kApolloMediaComposerPosterPayloadContextKey);
     @synchronized(ApolloMediaComposerVideoBridgeLock()) {
         NSMutableDictionary *consumed = ApolloMediaComposerConsumeContextLocked(associatedContext);
@@ -310,7 +314,11 @@ static BOOL ApolloPhotoComposerStringContains(NSString *haystack, NSString *need
 }
 
 static BOOL ApolloMediaComposerShouldWidenPicker(void) {
-    return sApolloMediaComposerContextActive || sApolloMediaComposerPickerActive;
+    return ApolloMediaComposerRedditUploadSelected() && (sApolloMediaComposerContextActive || sApolloMediaComposerPickerActive);
+}
+
+static BOOL ApolloMediaComposerRedditUploadSelected(void) {
+    return sImageUploadProvider == ImageUploadProviderReddit;
 }
 
 static BOOL ApolloPhotoComposerClassLooksLikeComposer(NSString *className) {
@@ -489,6 +497,12 @@ static NSUInteger ApolloPhotoComposerApplyMediaWordingToView(UIView *rootView) {
 }
 
 static void ApolloMediaComposerMarkContextActive(UIViewController *controller, NSString *reason) {
+    if (!ApolloMediaComposerRedditUploadSelected()) {
+        sApolloMediaComposerContextActive = NO;
+        sApolloMediaComposerPickerActive = NO;
+        return;
+    }
+
     if (!controller) return;
     NSString *className = NSStringFromClass(controller.class);
     if (!ApolloPhotoComposerClassLooksLikeComposer(className) && !ApolloPhotoComposerControllerIsInScope(controller)) return;
@@ -502,6 +516,7 @@ static void ApolloMediaComposerMarkContextActive(UIViewController *controller, N
 }
 
 static void ApolloPhotoComposerApplyMediaWording(UIViewController *controller) {
+    if (!ApolloMediaComposerRedditUploadSelected()) return;
     if (!ApolloPhotoComposerControllerIsInScope(controller)) return;
 
     NSUInteger changes = 0;
@@ -528,6 +543,7 @@ static BOOL ApolloPhotoComposerClassLooksLikeMediaPicker(NSString *className) {
 }
 
 static void ApolloPhotoComposerMarkPickerActive(NSString *reason) {
+    if (!ApolloMediaComposerRedditUploadSelected()) return;
     if (!sApolloMediaComposerPickerActive) {
         ApolloLog(@"[MediaComposer] custom media picker context active reason=%@", reason ?: @"(unknown)");
     }
@@ -686,6 +702,8 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 
     ApolloPhotoComposerRepairControllerBurst(presenter, @"present");
 
+    if (!ApolloMediaComposerRedditUploadSelected()) return;
+
     ApolloPhotoComposerMarkPickerActive(@"present");
 
     NSString *presentedClass = NSStringFromClass(presented.class);
@@ -794,11 +812,13 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 %hook ASTextNode
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
+    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
     ApolloMediaComposerLogTextCandidateOnce(@"ASTextNode setAttributedText:", self, attributedText.string);
     %orig(ApolloPhotoComposerAttributedReplacement(attributedText));
 }
 
 - (void)setText:(NSString *)text {
+    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
     ApolloMediaComposerLogTextCandidateOnce(@"ASTextNode setText:", self, text);
     %orig(ApolloPhotoComposerPlainReplacement(text));
 }
@@ -808,11 +828,13 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 %hook ASTextNode2
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
+    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
     ApolloMediaComposerLogTextCandidateOnce(@"ASTextNode2 setAttributedText:", self, attributedText.string);
     %orig(ApolloPhotoComposerAttributedReplacement(attributedText));
 }
 
 - (void)setText:(NSString *)text {
+    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
     ApolloMediaComposerLogTextCandidateOnce(@"ASTextNode2 setText:", self, text);
     %orig(ApolloPhotoComposerPlainReplacement(text));
 }
@@ -822,11 +844,13 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 %hook ASButtonNode
 
 - (void)setAttributedTitle:(NSAttributedString *)title forState:(UIControlState)state {
+    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
     ApolloMediaComposerLogTextCandidateOnce(@"ASButtonNode setAttributedTitle:forState:", self, title.string);
     %orig(ApolloPhotoComposerAttributedReplacement(title), state);
 }
 
 - (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color forState:(UIControlState)state {
+    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
     ApolloMediaComposerLogTextCandidateOnce(@"ASButtonNode setTitle:withFont:withColor:forState:", self, title);
     NSString *replacement = ApolloPhotoComposerPlainReplacement(title);
     if (!sApolloMediaComposerLoggedButtonTitleRewrite && [replacement isKindOfClass:[NSString class]] && ![replacement isEqualToString:title]) {
@@ -837,6 +861,7 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 }
 
 - (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color withShadowColor:(UIColor *)shadowColor withShadowOffset:(CGSize)shadowOffset forState:(UIControlState)state {
+    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
     ApolloMediaComposerLogTextCandidateOnce(@"ASButtonNode setTitle:withFont:withColor:withShadowColor:withShadowOffset:forState:", self, title);
     NSString *replacement = ApolloPhotoComposerPlainReplacement(title);
     if (!sApolloMediaComposerLoggedButtonTitleRewrite && [replacement isKindOfClass:[NSString class]] && ![replacement isEqualToString:title]) {
@@ -851,6 +876,7 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 %hook NSItemProvider
 
 - (BOOL)hasItemConformingToTypeIdentifier:(NSString *)typeIdentifier {
+    if (!ApolloMediaComposerShouldWidenPicker()) return %orig;
     if (ApolloMediaComposerProviderIsMarkedVideo((NSItemProvider *)self) && ApolloMediaComposerTypeIdentifierIsImageRequest(typeIdentifier)) {
         if (!sApolloMediaComposerLoggedProviderProbe) {
             sApolloMediaComposerLoggedProviderProbe = YES;
@@ -862,6 +888,7 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 }
 
 - (BOOL)canLoadObjectOfClass:(Class)aClass {
+    if (!ApolloMediaComposerShouldWidenPicker()) return %orig;
     if (ApolloMediaComposerProviderIsMarkedVideo((NSItemProvider *)self) && aClass == [UIImage class]) {
         ApolloLog(@"[MediaComposer] video provider answering canLoadObjectOfClass:UIImage");
         return YES;
@@ -870,6 +897,7 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 }
 
 - (NSProgress *)loadObjectOfClass:(Class)aClass completionHandler:(void (^)(id<NSSecureCoding> object, NSError *error))completionHandler {
+    if (!ApolloMediaComposerShouldWidenPicker()) return %orig;
     NSMutableDictionary *context = ApolloMediaComposerContextForProvider((NSItemProvider *)self);
     if (context && aClass == [UIImage class] && completionHandler) {
         NSString *typeIdentifier = context[@"typeIdentifier"];
@@ -898,6 +926,7 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 }
 
 - (NSProgress *)loadDataRepresentationForTypeIdentifier:(NSString *)typeIdentifier completionHandler:(void (^)(NSData *data, NSError *error))completionHandler {
+    if (!ApolloMediaComposerShouldWidenPicker()) return %orig;
     NSMutableDictionary *context = ApolloMediaComposerContextForProvider((NSItemProvider *)self);
     if (context && ApolloMediaComposerTypeIdentifierIsImageRequest(typeIdentifier) && completionHandler) {
         NSString *videoType = context[@"typeIdentifier"];
@@ -928,6 +957,7 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
 }
 
 - (NSProgress *)loadFileRepresentationForTypeIdentifier:(NSString *)typeIdentifier completionHandler:(void (^)(NSURL *url, NSError *error))completionHandler {
+    if (!ApolloMediaComposerShouldWidenPicker()) return %orig;
     NSMutableDictionary *context = ApolloMediaComposerContextForProvider((NSItemProvider *)self);
     if (context && ApolloMediaComposerTypeIdentifierIsImageRequest(typeIdentifier) && completionHandler) {
         NSString *videoType = context[@"typeIdentifier"];
