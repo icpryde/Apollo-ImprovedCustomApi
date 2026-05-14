@@ -17,6 +17,8 @@ ApolloImprovedCustomApi_FILES = \
     Tweak.xm \
     ApolloCommon.m \
     ApolloRedditMediaUpload.m \
+    ApolloUserProfileCache.m \
+    ApolloUserAvatars.xm \
     ApolloImageUploadHost.xm \
     ApolloPhotoPostComposerScrollFix.xm \
     ApolloCreatedAtAlert.xm \
@@ -34,7 +36,6 @@ ApolloImprovedCustomApi_FILES = \
     ApolloVideoSwipeFix.xm \
     ApolloTagFilters.xm \
     ApolloInlineImages.xm \
-    ApolloHideNextParentButton.xm \
     CustomAPIViewController.m \
     TranslationSettingsViewController.m \
     SavedCategoriesViewController.m \

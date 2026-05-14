@@ -35,7 +35,6 @@ static NSString *ValetOverrideValue(NSString *account) {
             @"meganotifs":              @"affirmative", // Ultra
             @"seconds_since2":          @"1473982",     // Pro
             @"rep_seconds_since2":      @"1473982",     // Pro (alternate?)
-            @"pixelpalfoodtokensgiven": @"affirmative", // Community icons
             @"rep_seconds_after2":      @"1482118",     // SPCA Animals icon pack
         };
     });
@@ -889,6 +888,7 @@ static void initializeRandomSources() {
                                     UDKeyProxyImgurDDG: @NO,
                                     UDKeyEnableInlineImages: @YES,
                                     UDKeyImageUploadProvider: @(ImageUploadProviderImgur),
+                                    UDKeyShowUserAvatars: @NO,
                                     UDKeyEnableBulkTranslation: @NO,
                                     UDKeyAutoTranslateOnAppear: @YES,
                                     UDKeyTranslatePostTitles: @NO,
@@ -916,6 +916,7 @@ static void initializeRandomSources() {
     sProxyImgurDDG = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG];
     sEnableInlineImages = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableInlineImages];
     sImageUploadProvider = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyImageUploadProvider];
+    sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
     sEnableBulkTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableBulkTranslation];
     sAutoTranslateOnAppear = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoTranslateOnAppear];
     sTranslatePostTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTranslatePostTitles];

@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 ## Unreleased
 
 - Fix Reddit-hosted multi-image photo posts by submitting them as native Reddit galleries instead of Imgur albums, including the post-submit comments permalink Apollo opens after success.
+- Fix the Photo Post composer thumbnail strip so all selected images can be reviewed with reliable horizontal scrolling before submit.
+- Preserve typed text when submitting Reddit-hosted image comments.
+- Remove duplicate **Hide Next Parent Button** setting; Apollo already provides this as **Show Jump Button**.
 
 ## [v2.10.0] - 2026-05-12
 

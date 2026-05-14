@@ -240,8 +240,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (section) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 6; // 4 text fields + Can't sign in? + Instructions
-        case SectionGeneral: return 8;
-        case SectionMedia: return 5;
+        case SectionGeneral: return 7;
+        case SectionMedia: return 6;
         case SectionSubreddits: return 5;
         case SectionAbout: return 3; // GitHub repo link + version + export logs
         case SectionCredits: return 3;
@@ -543,11 +543,6 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Open Steam Links in App"
                                                on:[defaults boolForKey:UDKeyOpenLinksInSteamApp]
                                            action:@selector(steamAppSwitchToggled:)];
-        case 7:
-            return [self switchCellWithIdentifier:@"Cell_Gen_HideNextParent"
-                                            label:@"Hide Next Parent Button"
-                                               on:[defaults boolForKey:UDKeyHideNextParentButton]
-                                           action:@selector(hideNextParentButtonSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -600,6 +595,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Inline Media Previews"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableInlineImages]
                                            action:@selector(inlineImagesSwitchToggled:)];
+        case 5:
+            return [self switchCellWithIdentifier:@"Cell_Media_UserAvatars"
+                                            label:@"Show User Profile Pictures"
+                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars]
+                                           action:@selector(userAvatarsSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1098,11 +1098,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyOpenLinksInSteamApp];
 }
 
-- (void)hideNextParentButtonSwitchToggled:(UISwitch *)sender {
-    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyHideNextParentButton];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloHideNextParentButtonChanged" object:nil];
-}
-
 - (void)collapsePinnedCommentsSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyCollapsePinnedComments];
 }
@@ -1114,6 +1109,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)proxyImgurDDGSwitchToggled:(UISwitch *)sender {
     sProxyImgurDDG = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sProxyImgurDDG forKey:UDKeyProxyImgurDDG];
+}
+
+- (void)userAvatarsSwitchToggled:(UISwitch *)sender {
+    sShowUserAvatars = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sShowUserAvatars forKey:UDKeyShowUserAvatars];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];
 }
 
 - (void)inlineImagesSwitchToggled:(UISwitch *)sender {
