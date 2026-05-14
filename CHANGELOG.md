@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## Unreleased
 
 - Preserve typed text when submitting Reddit-hosted image comments.
+- Remove duplicate **Hide Next Parent Button** setting; Apollo already provides this as **Show Jump Button**.
 
 ## [v2.10.0] - 2026-05-12
 
