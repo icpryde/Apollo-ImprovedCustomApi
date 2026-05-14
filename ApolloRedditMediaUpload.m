@@ -159,7 +159,7 @@ NSData *ApolloSyntheticImgurUploadResponseData(NSURL *imageURL, NSString *mimeTy
         @"success": @YES,
         @"data": @{
             @"id": imageID,
-            @"deletehash": @"",
+            @"deletehash": imageID,
             @"account_id": [NSNull null],
             @"account_url": [NSNull null],
             @"ad_type": [NSNull null],

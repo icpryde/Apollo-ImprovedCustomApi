@@ -333,6 +333,14 @@ static void StripRapidAPIHeaders(NSMutableURLRequest *request) {
     [request setValue:nil forHTTPHeaderField:@"X-RapidAPI-Host"];
 }
 
+static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
+    NSString *suffix = path.length > 0 ? path : @"apollo-local";
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[@"http://127.0.0.1:1/" stringByAppendingString:suffix]]];
+    request.HTTPMethod = @"POST";
+    request.timeoutInterval = 1.0;
+    return request;
+}
+
 %hook NSURLSession
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
@@ -464,6 +472,18 @@ static void StripRapidAPIHeaders(NSMutableURLRequest *request) {
     NSURL *url = [request URL];
     NSString *host = [url host];
     NSString *path = [url path];
+
+    NSData *redditAlbumResponseData = sImageUploadProvider == ImageUploadProviderReddit ? ApolloRedditSyntheticImgurAlbumResponseDataForRequest(request) : nil;
+    if (sImageUploadProvider == ImageUploadProviderReddit && redditAlbumResponseData.length > 0) {
+        NSHTTPURLResponse *fakeHTTPResponse = [[NSHTTPURLResponse alloc] initWithURL:url
+                                                                          statusCode:200
+                                                                         HTTPVersion:@"HTTP/1.1"
+                                                                        headerFields:@{@"Content-Type": @"application/json"}];
+        void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *data, __unused NSURLResponse *response, __unused NSError *error) {
+            completionHandler(redditAlbumResponseData, fakeHTTPResponse, nil);
+        };
+        return %orig(ApolloLocalFastFailRequest(@"apollo-reddit-gallery-album"), wrappedHandler);
+    }
 
     if ([host isEqualToString:@"imgur-apiv3.p.rapidapi.com"] && [path hasPrefix:@"/3/album"]) {
         // Album creation needs body format conversion (form-urlencoded → JSON)

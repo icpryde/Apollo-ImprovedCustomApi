@@ -15,6 +15,7 @@ void ApolloRedditCaptureBearerTokenFromRequest(NSURLRequest *request, NSString *
 // Request rewriting. Returns nil if the request should be passed through unchanged.
 NSURLRequest *ApolloRedditMaybeRewriteSubmitRequest(NSURLRequest *request);
 NSURLRequest *ApolloRedditMaybeRewriteCommentRequest(NSURLRequest *request);
+NSData *ApolloRedditSyntheticImgurAlbumResponseDataForRequest(NSURLRequest *request);
 
 // Task identification (matches against original/current request).
 BOOL ApolloRedditIsSubmitTask(NSURLSessionTask *task);
