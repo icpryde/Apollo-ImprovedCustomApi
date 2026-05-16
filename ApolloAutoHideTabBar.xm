@@ -397,18 +397,22 @@ static void ApolloMirrorNavBarStateToTabBar(UINavigationController *nav, BOOL na
     UITabBarController *tbc = nil;
     BOOL shouldScheduleIdleReveal = NO;
 
-    %orig(contentOffset);
-
     if (sAutoHideTabBarShowOnIdle && ApolloSupportsNativeTabBarMinimize() && self.window &&
         (self.tracking || self.dragging || self.decelerating) && fabs(deltaY) >= 0.5) {
         tbc = ApolloTabBarControllerForScrollView(self);
         if (ApolloTabBarControllerWantsNativeMinimize(tbc)) {
-            if (ApolloLastAppliedMinimizeBehavior(tbc) == ApolloTabBarMinimizeBehaviorNever) {
+            // Re-arm before UIKit processes this offset. If we wait until after
+            // %orig, a fast fling can spend its first scroll update in .never
+            // and miss the native Liquid Glass collapse threshold.
+            if (deltaY > 0.0 &&
+                ApolloLastAppliedMinimizeBehavior(tbc) == ApolloTabBarMinimizeBehaviorNever) {
                 ApolloApplyMinimizeBehavior(tbc, ApolloTabBarMinimizeBehaviorOnScrollDown);
             }
             shouldScheduleIdleReveal = YES;
         }
     }
+
+    %orig(contentOffset);
 
     if (shouldScheduleIdleReveal) {
         ApolloScheduleIdleRevealTimer(tbc);
