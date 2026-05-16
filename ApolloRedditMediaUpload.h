@@ -29,9 +29,16 @@ ApolloRedditMediaUploadOperation *ApolloUploadMediaDataToRedditCancellable(NSDat
                                                                            NSString *userAgent,
                                                                            ApolloRedditMediaUploadProgress progressHandler,
                                                                            ApolloRedditMediaUploadCompletion completion);
+ApolloRedditMediaUploadOperation *ApolloUploadMediaFileToRedditCancellable(NSURL *mediaFileURL,
+                                                                           NSString *filename,
+                                                                           NSString *mimeType,
+                                                                           NSString *bearerToken,
+                                                                           NSString *userAgent,
+                                                                           ApolloRedditMediaUploadProgress progressHandler,
+                                                                           ApolloRedditMediaUploadCompletion completion);
 void ApolloUploadMediaDataToReddit(NSData *mediaData,
-                                  NSString *filename,
-                                  NSString *mimeType,
+                                   NSString *filename,
+                                   NSString *mimeType,
                                   NSString *bearerToken,
                                   NSString *userAgent,
                                   ApolloRedditMediaUploadCompletion completion);

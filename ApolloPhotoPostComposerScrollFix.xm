@@ -103,7 +103,6 @@ static __weak UIViewController *sApolloMediaComposerActiveBodyController = nil;
 static __weak UIViewController *sApolloMediaComposerLastBodyOwnerController = nil;
 static __strong NSString *sApolloMediaComposerLastBodyText = nil;
 static NSTimeInterval sApolloMediaComposerLastBodyTextAt = 0.0;
-static BOOL sApolloMediaComposerDidSelectHookInstalled = NO;
 static BOOL sApolloMediaComposerSawBodyOwnerController = NO;
 // V19: retain a copy of the most recently consumed selected-video context so that an
 // upload that gets cancelled (Apollo keeps its in-memory poster JPEG, but our entry
@@ -122,11 +121,9 @@ static char kApolloMediaComposerPosterPayloadContextKey;
 
 static NSData *(*orig_UIImageJPEGRepresentation)(UIImage *image, CGFloat compressionQuality) = NULL;
 static NSData *(*orig_UIImagePNGRepresentation)(UIImage *image) = NULL;
-static NSInteger (*orig_ApolloCompose_tableView_numberOfRowsInSection)(id self, SEL _cmd, UITableView *tableView, NSInteger section) = NULL;
 static UITableViewCell *(*orig_ApolloCompose_tableView_cellForRowAtIndexPath)(id self, SEL _cmd, UITableView *tableView, NSIndexPath *indexPath) = NULL;
 static CGFloat (*orig_ApolloCompose_tableView_heightForRowAtIndexPath)(id self, SEL _cmd, UITableView *tableView, NSIndexPath *indexPath) = NULL;
 static CGFloat (*orig_ApolloCompose_tableView_estimatedHeightForRowAtIndexPath)(id self, SEL _cmd, UITableView *tableView, NSIndexPath *indexPath) = NULL;
-static void (*orig_ApolloCompose_tableView_didSelectRowAtIndexPath)(id self, SEL _cmd, UITableView *tableView, NSIndexPath *indexPath) = NULL;
 
 static BOOL ApolloMediaComposerRedditUploadSelected(void);
 static BOOL ApolloMediaComposerShouldWidenPicker(void);
@@ -139,6 +136,7 @@ static UIViewController *ApolloMediaComposerCaptureBodyTextView(UITextView *text
 static void ApolloMediaComposerCaptureBodyTextViewMutation(UITextView *textView, NSString *reason);
 static void ApolloMediaComposerOpenNativeBodyEditor(UIViewController *controller);
 static UIViewController *ApolloMediaComposerVisibleControllerFromController(UIViewController *controller);
+static void ApolloMediaComposerCleanupVideoContext(NSMutableDictionary *context, BOOL deleteFiles, NSString *reason);
 
 @interface ApolloMediaComposerWeakControllerBox : NSObject
 @property (nonatomic, weak) UIViewController *controller;
@@ -206,7 +204,11 @@ static void ApolloMediaComposerPrunePendingVideoContextsLocked(NSString *reason)
     NSUInteger before = sApolloMediaComposerPendingVideoContexts.count;
     NSMutableArray *kept = [NSMutableArray arrayWithCapacity:sApolloMediaComposerPendingVideoContexts.count];
     for (NSMutableDictionary *context in sApolloMediaComposerPendingVideoContexts) {
-        if (![context[@"consumed"] boolValue] && ApolloMediaComposerVideoContextIsFresh(context, now)) [kept addObject:context];
+        if (![context[@"consumed"] boolValue] && ApolloMediaComposerVideoContextIsFresh(context, now)) {
+            [kept addObject:context];
+        } else {
+            ApolloMediaComposerCleanupVideoContext(context, YES, reason ?: @"prune");
+        }
     }
     if (kept.count != before) {
         sApolloMediaComposerPendingVideoContexts = kept;
@@ -217,6 +219,9 @@ static void ApolloMediaComposerPrunePendingVideoContextsLocked(NSString *reason)
 static void ApolloMediaComposerClearPendingVideoContexts(NSString *reason) {
     @synchronized(ApolloMediaComposerVideoBridgeLock()) {
         NSUInteger count = sApolloMediaComposerPendingVideoContexts.count;
+        for (NSMutableDictionary *context in [sApolloMediaComposerPendingVideoContexts copy]) {
+            ApolloMediaComposerCleanupVideoContext(context, YES, reason ?: @"clear-pending");
+        }
         [sApolloMediaComposerPendingVideoContexts removeAllObjects];
         sApolloMediaComposerExpectingVideoUpload = NO;
         sApolloMediaComposerLastVideoContextClearReason = [reason copy] ?: @"(unknown)";
@@ -225,6 +230,7 @@ static void ApolloMediaComposerClearPendingVideoContexts(NSString *reason) {
         // invalidate the recently-consumed reclaim slot so we can never retry a stale
         // video against a brand-new upload.
         if (sApolloMediaComposerLastConsumedVideoContext) {
+            ApolloMediaComposerCleanupVideoContext(sApolloMediaComposerLastConsumedVideoContext, YES, reason ?: @"clear-recent");
             sApolloMediaComposerLastConsumedVideoContext = nil;
             sApolloMediaComposerLastConsumedAt = 0.0;
             ApolloLog(@"[MediaComposer] cleared recently-consumed video context reason=%@", reason ?: @"(unknown)");
@@ -345,6 +351,74 @@ static NSString *ApolloMediaComposerVideoMIMETypeForTypeIdentifier(NSString *typ
 static NSString *ApolloMediaComposerVideoExtensionForTypeIdentifier(NSString *typeIdentifier, NSURL *fileURL) {
     NSString *mimeType = ApolloMediaComposerVideoMIMETypeForTypeIdentifier(typeIdentifier, fileURL);
     return [mimeType isEqualToString:@"video/quicktime"] ? @"mov" : @"mp4";
+}
+
+static BOOL ApolloMediaComposerURLIsOwnedTempFile(NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]] || !url.isFileURL) return NO;
+    NSString *tempPath = [NSTemporaryDirectory() stringByStandardizingPath];
+    NSString *path = url.path.stringByStandardizingPath;
+    NSString *name = url.lastPathComponent ?: @"";
+    return [path hasPrefix:tempPath] &&
+        ([name hasPrefix:@"apollo-selected-video-"] || [name hasPrefix:@"apollo-selected-video-poster-"]);
+}
+
+static void ApolloMediaComposerRemoveOwnedTempURL(NSURL *url, NSString *reason) {
+    if (!ApolloMediaComposerURLIsOwnedTempFile(url)) return;
+    NSError *error = nil;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:url.path] &&
+        ![[NSFileManager defaultManager] removeItemAtURL:url error:&error]) {
+        ApolloLog(@"[MediaComposer] failed to remove temp media file %@ reason=%@ error=%@",
+            url.lastPathComponent ?: @"(missing)", reason ?: @"(unknown)", error.localizedDescription ?: @"unknown");
+    }
+}
+
+static void ApolloMediaComposerBreakPosterPayloadCycle(NSMutableDictionary *context) {
+    if (![context isKindOfClass:[NSMutableDictionary class]]) return;
+    NSData *posterData = [context[@"posterData"] isKindOfClass:[NSData class]] ? context[@"posterData"] : nil;
+    if (posterData) {
+        objc_setAssociatedObject(posterData, &kApolloMediaComposerPosterPayloadContextKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    }
+}
+
+static void ApolloMediaComposerCleanupVideoContext(NSMutableDictionary *context, BOOL deleteFiles, NSString *reason) {
+    if (![context isKindOfClass:[NSMutableDictionary class]]) return;
+    ApolloMediaComposerBreakPosterPayloadCycle(context);
+    if (deleteFiles) {
+        ApolloMediaComposerRemoveOwnedTempURL(context[@"fileURL"], reason);
+        ApolloMediaComposerRemoveOwnedTempURL(context[@"posterFileURL"], reason);
+    }
+    [context removeObjectForKey:@"posterData"];
+}
+
+static void ApolloMediaComposerScheduleRecentlyConsumedCleanup(NSTimeInterval consumedAt) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((kApolloMediaComposerVideoContextRetryWindow + 5.0) * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @synchronized(ApolloMediaComposerVideoBridgeLock()) {
+            if (!sApolloMediaComposerLastConsumedVideoContext || fabs(sApolloMediaComposerLastConsumedAt - consumedAt) > 0.001) return;
+            ApolloMediaComposerCleanupVideoContext(sApolloMediaComposerLastConsumedVideoContext, YES, @"retry-window-expired");
+            sApolloMediaComposerLastConsumedVideoContext = nil;
+            sApolloMediaComposerLastConsumedAt = 0.0;
+            ApolloLog(@"[MediaComposer] cleaned selected-video retry context after retry window");
+        }
+    });
+}
+
+extern "C" void ApolloMediaComposerCompleteVideoUploadContext(NSDictionary *context, BOOL keepRetry, NSString *reason) {
+    if (![context isKindOfClass:[NSDictionary class]]) return;
+    @synchronized(ApolloMediaComposerVideoBridgeLock()) {
+        NSMutableDictionary *mutableContext = [context isKindOfClass:[NSMutableDictionary class]] ? (NSMutableDictionary *)context : [context mutableCopy];
+        BOOL matchesRecent = sApolloMediaComposerLastConsumedVideoContext &&
+            [sApolloMediaComposerLastConsumedVideoContext[@"fileURL"] isEqual:mutableContext[@"fileURL"]];
+        if (keepRetry) {
+            if (matchesRecent) ApolloMediaComposerScheduleRecentlyConsumedCleanup(sApolloMediaComposerLastConsumedAt);
+            return;
+        }
+        ApolloMediaComposerCleanupVideoContext(mutableContext, YES, reason ?: @"upload-complete");
+        if (matchesRecent) {
+            ApolloMediaComposerCleanupVideoContext(sApolloMediaComposerLastConsumedVideoContext, YES, reason ?: @"upload-complete");
+            sApolloMediaComposerLastConsumedVideoContext = nil;
+            sApolloMediaComposerLastConsumedAt = 0.0;
+        }
+    }
 }
 
 static BOOL ApolloMediaComposerVideoExtensionIsAllowed(NSString *extension) {
@@ -584,17 +658,22 @@ static NSMutableDictionary *ApolloMediaComposerConsumeContextLocked(NSMutableDic
     if (!ApolloMediaComposerVideoContextIsFresh(context, ApolloMediaComposerNow())) {
         context[@"consumed"] = @YES;
         [sApolloMediaComposerPendingVideoContexts removeObjectIdenticalTo:context];
+        ApolloMediaComposerCleanupVideoContext(context, YES, @"consume-stale");
         ApolloLog(@"[MediaComposer] discarded stale selected-video context before upload");
         return nil;
     }
     context[@"consumed"] = @YES;
     [sApolloMediaComposerPendingVideoContexts removeObjectIdenticalTo:context];
     NSMutableDictionary *consumedCopy = [context mutableCopy];
+    ApolloMediaComposerBreakPosterPayloadCycle(context);
+    [context removeObjectForKey:@"posterData"];
     // V19: stash for cancel+retry reclaim. Mark consumedAt so the retry window can
     // expire it cleanly even if no further uploads happen.
-    consumedCopy[@"consumedAt"] = @(ApolloMediaComposerNow());
+    NSTimeInterval consumedAt = ApolloMediaComposerNow();
+    consumedCopy[@"consumedAt"] = @(consumedAt);
     sApolloMediaComposerLastConsumedVideoContext = [consumedCopy mutableCopy];
-    sApolloMediaComposerLastConsumedAt = ApolloMediaComposerNow();
+    sApolloMediaComposerLastConsumedAt = consumedAt;
+    ApolloMediaComposerScheduleRecentlyConsumedCleanup(consumedAt);
     return consumedCopy;
 }
 
@@ -726,6 +805,12 @@ static void ApolloMediaComposerMarkVideoProvider(NSItemProvider *provider, NSStr
 
 static void ApolloMediaComposerPresentPickerWarning(id picker, NSString *title, NSString *message) {
     if (title.length == 0 || message.length == 0) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloMediaComposerPresentPickerWarning(picker, title, message);
+        });
+        return;
+    }
     // Capture the presenting controller chain SYNCHRONOUSLY now, because once Apollo's delegate
     // dismisses the PHPicker (which it does immediately after didFinishPicking returns) the
     // picker's `presentingViewController` becomes nil and we can't find a host to present from.
@@ -740,8 +825,10 @@ static void ApolloMediaComposerPresentPickerWarning(id picker, NSString *title, 
     NSString *capturedMessage = [message copy];
 
     NSArray<NSNumber *> *delays = @[@0.55, @1.1, @1.8];
+    __block BOOL didPresent = NO;
     for (NSNumber *delay in delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (didPresent) return;
             UIViewController *baseController = weakPresenter;
             if (!baseController) {
                 UIWindow *retryWindow = nil;
@@ -759,6 +846,7 @@ static void ApolloMediaComposerPresentPickerWarning(id picker, NSString *title, 
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:capturedTitle message:capturedMessage preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             [targetController presentViewController:alert animated:YES completion:nil];
+            didPresent = YES;
             ApolloLog(@"[MediaComposer] picker warning presented title=%@ host=%@ attemptDelay=%.2fs", capturedTitle, NSStringFromClass(targetController.class) ?: @"(unknown)", delay.doubleValue);
             weakPresenter = nil; // mark presented so subsequent attempts no-op via the alert-already-presented check above
         });
@@ -917,6 +1005,8 @@ static BOOL ApolloPhotoComposerControllerIsInScope(UIViewController *controller)
     NSString *title = controller.navigationItem.title ?: controller.title;
     if (ApolloPhotoComposerStringContains(title, @"Photo Post")) return YES;
     if (ApolloPhotoComposerStringContains(title, @"Media Post")) return YES;
+
+    if (!ApolloPhotoComposerClassLooksLikeComposer(NSStringFromClass(controller.class))) return NO;
 
     UIView *view = controller.view;
     BOOL hasPhotoChooser = ApolloPhotoComposerViewContainsText(view, @"Choose from Photos") ||
@@ -1430,9 +1520,10 @@ static void ApolloMediaComposerWritePostTypeSlot(UIViewController *controller, N
 }
 
 static void ApolloMediaComposerSendPostTypeChanged(UIViewController *controller, UISegmentedControl *segmentedControl) {
+    if (!segmentedControl) return;
     SEL selector = NSSelectorFromString(@"postTypeSegmentedControlValueChanged:");
     if (![controller respondsToSelector:selector]) return;
-    ((void (*)(id, SEL, id))objc_msgSend)(controller, selector, segmentedControl ?: controller);
+    ((void (*)(id, SEL, id))objc_msgSend)(controller, selector, segmentedControl);
 }
 
 static void ApolloMediaComposerRestoreOriginalPostType(UIViewController *controller, BOOL notifyApollo, NSString *reason) {
@@ -1743,14 +1834,15 @@ static NSUInteger ApolloMediaComposerMarkNativeBodyTextViewsInView(UIView *rootV
         if ([view isKindOfClass:[UITextView class]]) {
             UITextView *textView = (UITextView *)view;
             NSString *className = NSStringFromClass(textView.class);
+            CGFloat textViewHeight = textView.bounds.size.height;
             NSInteger score = 0;
             if (ApolloPhotoComposerStringContains(className, @"PlaceHolderTextView")) score += 80;
             if (ApolloPhotoComposerStringContains(className, @"InputTextView")) score += 40;
             if (ApolloPhotoComposerStringContains(className, @"PasteableTextView")) score += 30;
-            score += (NSInteger)MIN(240.0, MAX(0.0, textView.bounds.size.height));
+            score += (NSInteger)MIN(240.0, MAX(0.0, textViewHeight));
             score += textView.editable ? 25 : -60;
             score += textView.userInteractionEnabled ? 10 : -20;
-            if (textView.bounds.size.height < 80.0) score -= 80;
+            if (textViewHeight < 30.0) score -= 80;
             if (score > bestScore) {
                 bestScore = score;
                 bestTextView = textView;
@@ -2425,6 +2517,95 @@ extern "C" void ApolloMediaComposerMarkBodyTextSubmitted(void) {
     } else {
         ApolloMediaComposerClearBodyStateForController(nil, @"submit");
     }
+
+    // The submit succeeded — any pending/consumed selected-video temp files are
+    // no longer needed for retry, so reclaim them immediately rather than
+    // waiting for the retry-window timer.
+    ApolloMediaComposerClearPendingVideoContexts(@"submit-success");
+}
+
+// Returns the bearer-token NSString from a UIViewController's
+// `temporaryPostingAccount` ivar (an RDKClient) by walking
+// authorizationCredential -> accessToken -> accessToken. Returns nil if any
+// step is missing or the ivar doesn't hold an ObjC object.
+static NSString *ApolloMediaComposerBearerTokenFromController(UIViewController *controller) {
+    if (![controller isKindOfClass:[UIViewController class]]) return nil;
+
+    Ivar tempIvar = class_getInstanceVariable(controller.class, "temporaryPostingAccount");
+    if (!tempIvar) return nil;
+    // Defensive: only follow this ivar if the ObjC runtime tells us it holds an
+    // ObjC object. Swift value-type ivars (e.g. `String`, `URL`) get registered
+    // under their property name too, and reading them via `object_getIvar`
+    // returns inline bytes that crash any subsequent ObjC retain/release.
+    const char *encoding = ivar_getTypeEncoding(tempIvar);
+    if (!encoding || encoding[0] != '@') return nil;
+    id account = object_getIvar(controller, tempIvar);
+    if (!account) return nil;
+
+    SEL credSel = NSSelectorFromString(@"authorizationCredential");
+    if (![account respondsToSelector:credSel]) return nil;
+    id credential = ((id (*)(id, SEL))objc_msgSend)(account, credSel);
+    if (!credential) return nil;
+
+    SEL tokenSel = NSSelectorFromString(@"accessToken");
+    if (![credential respondsToSelector:tokenSel]) return nil;
+    id accessTokenObj = ((id (*)(id, SEL))objc_msgSend)(credential, tokenSel);
+    if (!accessTokenObj) return nil;
+
+    // RDKOAuthCredential.accessToken returns an RDKAccessToken; its own
+    // accessToken getter returns the raw NSString bearer token.
+    if (![accessTokenObj respondsToSelector:tokenSel]) return nil;
+    id tokenString = ((id (*)(id, SEL))objc_msgSend)(accessTokenObj, tokenSel);
+    if (![tokenString isKindOfClass:[NSString class]]) return nil;
+    if ([(NSString *)tokenString length] == 0) return nil;
+    return [(NSString *)tokenString copy];
+}
+
+// Walks the visible window/responder hierarchy looking for any Apollo compose
+// controller (post or comment) that has a non-nil `temporaryPostingAccount`.
+// We prefer a topmost presented controller, since that's the one the user is
+// interacting with.
+static UIViewController *ApolloMediaComposerActiveComposeControllerForToken(void) {
+    // Fast path: the post composer we already track explicitly.
+    UIViewController *tracked = ApolloMediaComposerCanonicalBodyController(sApolloMediaComposerActiveBodyController) ?: sApolloMediaComposerActiveBodyController;
+    if (tracked) {
+        NSString *cls = NSStringFromClass(tracked.class) ?: @"";
+        if ([cls hasSuffix:@"ComposePostViewController"] || [cls hasSuffix:@"ComposeViewController"]) {
+            return tracked;
+        }
+    }
+
+    // Fallback: walk window roots and presented chains. We expect at most a
+    // handful of UIWindows, and presented-controller depth is small.
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            UIViewController *vc = window.rootViewController;
+            NSUInteger guard = 0;
+            while (vc && guard++ < 32) {
+                NSString *cls = NSStringFromClass(vc.class) ?: @"";
+                if ([cls hasSuffix:@"ComposePostViewController"] || [cls hasSuffix:@"ComposeViewController"]) {
+                    return vc;
+                }
+                vc = vc.presentedViewController;
+            }
+        }
+    }
+    return nil;
+}
+
+// Returns the bearer token for the account that will submit the current
+// compose's post or comment, if a temporary posting account has been chosen
+// via the account-chooser title button. Returns nil when no temporary account
+// is set (in which case callers should fall back to the last captured bearer
+// token).
+//
+// Covers both `ComposePostViewController` (photo/media post composer) and
+// `ComposeViewController` (comment / text / reply composer) — both expose a
+// `temporaryPostingAccount` ivar (verified in Headers/).
+extern "C" NSString *ApolloMediaComposerActivePostingBearerToken(void) {
+    UIViewController *controller = ApolloMediaComposerActiveComposeControllerForToken();
+    return ApolloMediaComposerBearerTokenFromController(controller);
 }
 
 static NSString *ApolloPhotoComposerReplacementText(NSString *text) {
@@ -2454,6 +2635,10 @@ static NSArray<NSArray<NSString *> *> *ApolloPhotoComposerInlineSubstringReplace
             @[@"Select up to 10 photos", @"Select photos or 1 video"],
             @[@"Choose Photos", @"Choose Media"],
             @[@"Select Photos", @"Select Media"],
+            // Multi-account composer title button uses an attributed
+            // "Photo Post\nu/username" title — exact-match against "Photo Post"
+            // misses it because the username is part of the same string.
+            @[@"Photo Post", @"Media Post"],
         ];
     });
     return list;
@@ -2531,12 +2716,29 @@ static NSUInteger ApolloPhotoComposerApplyMediaWordingToView(UIView *rootView) {
 
         if ([view isKindOfClass:[UILabel class]]) {
             UILabel *label = (UILabel *)view;
-            NSString *replacement = ApolloPhotoComposerVisibleReplacementText(label.text);
-            if (replacement.length > 0) { label.text = replacement; changes++; }
+            // Preserve attributed styling (Apollo's account chooser uses
+            // attributed text with mixed fonts for title/subtitle lines).
+            NSAttributedString *attributed = label.attributedText;
+            if (attributed.length > 0) {
+                NSAttributedString *replaced = ApolloPhotoComposerAttributedReplacement(attributed);
+                if (replaced != attributed) { label.attributedText = replaced; changes++; }
+            } else {
+                NSString *replacement = ApolloPhotoComposerVisibleReplacementText(label.text);
+                if (replacement.length > 0) { label.text = replacement; changes++; }
+            }
         } else if ([view isKindOfClass:[UIButton class]]) {
             UIButton *button = (UIButton *)view;
-            NSString *replacement = ApolloPhotoComposerVisibleReplacementText([button currentTitle]);
-            if (replacement.length > 0) { [button setTitle:replacement forState:UIControlStateNormal]; changes++; }
+            // The account chooser title button uses an attributed title with
+            // line breaks (title + username sublabel). setTitle:forState: would
+            // strip the attributed styling, so prefer the attributed path.
+            NSAttributedString *attributed = [button attributedTitleForState:UIControlStateNormal];
+            if (attributed.length > 0) {
+                NSAttributedString *replaced = ApolloPhotoComposerAttributedReplacement(attributed);
+                if (replaced != attributed) { [button setAttributedTitle:replaced forState:UIControlStateNormal]; changes++; }
+            } else {
+                NSString *replacement = ApolloPhotoComposerVisibleReplacementText([button currentTitle]);
+                if (replacement.length > 0) { [button setTitle:replacement forState:UIControlStateNormal]; changes++; }
+            }
         } else if ([view isKindOfClass:[UISegmentedControl class]]) {
             UISegmentedControl *segmentedControl = (UISegmentedControl *)view;
             for (NSUInteger index = 0; index < segmentedControl.numberOfSegments; index++) {
@@ -2582,6 +2784,15 @@ static void ApolloPhotoComposerApplyMediaWording(UIViewController *controller) {
     NSString *titleReplacement = ApolloPhotoComposerReplacementText(controller.title);
     if (titleReplacement.length > 0) { controller.title = titleReplacement; changes++; }
     changes += ApolloPhotoComposerApplyMediaWordingToView(controller.view);
+
+    // Multi-account composers replace the title text with a custom UIView in
+    // navigationItem.titleView (Apollo's accountChooserTitleView), containing a
+    // "Photo Post" label and a username sublabel. This view is parented to the
+    // navigation bar, not controller.view, so the regular walk misses it.
+    UIView *titleView = controller.navigationItem.titleView;
+    if ([titleView isKindOfClass:[UIView class]]) {
+        changes += ApolloPhotoComposerApplyMediaWordingToView(titleView);
+    }
 
     NSNumber *logged = objc_getAssociatedObject(controller, &kApolloPhotoComposerWordingLoggedControllerKey);
     if (changes > 0 && ![logged boolValue]) {
@@ -2699,6 +2910,15 @@ static void ApolloPhotoComposerMarkPickerActive(NSString *reason) {
         ApolloLog(@"[MediaComposer] custom media picker context active reason=%@", reason ?: @"(unknown)");
     }
     sApolloMediaComposerPickerActive = YES;
+}
+
+static void ApolloMediaComposerResetTransientScope(NSString *reason) {
+    if (sApolloMediaComposerContextActive || sApolloMediaComposerPickerActive || sApolloMediaComposerInlineBodyPickerActive) {
+        ApolloLog(@"[MediaComposer] reset transient composer scope reason=%@", reason ?: @"(unknown)");
+    }
+    sApolloMediaComposerContextActive = NO;
+    sApolloMediaComposerPickerActive = NO;
+    ApolloMediaComposerSetInlineBodyPickerActive(NO, reason ?: @"reset-scope");
 }
 
 static NSPredicate *ApolloMediaComposerPredicateAllowingImagesAndVideos(NSPredicate *predicate) {
@@ -2896,10 +3116,6 @@ static void ApolloPhotoComposerMaybeEnableMoviePicking(UIViewController *present
     ApolloLog(@"[MediaComposer] enabled UIImagePickerController image/movie media types");
 }
 
-static NSInteger hooked_ApolloCompose_tableView_numberOfRowsInSection(id self, SEL _cmd, UITableView *tableView, NSInteger section) {
-    return orig_ApolloCompose_tableView_numberOfRowsInSection ? orig_ApolloCompose_tableView_numberOfRowsInSection(self, _cmd, tableView, section) : 0;
-}
-
 static UITableViewCell *hooked_ApolloCompose_tableView_cellForRowAtIndexPath(id self, SEL _cmd, UITableView *tableView, NSIndexPath *indexPath) {
     UIViewController *controller = (UIViewController *)self;
     UITableViewCell *cell = orig_ApolloCompose_tableView_cellForRowAtIndexPath ? orig_ApolloCompose_tableView_cellForRowAtIndexPath(self, _cmd, tableView, indexPath) : [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
@@ -2925,10 +3141,6 @@ static CGFloat hooked_ApolloCompose_tableView_estimatedHeightForRowAtIndexPath(i
     return height;
 }
 
-static void hooked_ApolloCompose_tableView_didSelectRowAtIndexPath(id self, SEL _cmd, UITableView *tableView, NSIndexPath *indexPath) {
-    if (orig_ApolloCompose_tableView_didSelectRowAtIndexPath) orig_ApolloCompose_tableView_didSelectRowAtIndexPath(self, _cmd, tableView, indexPath);
-}
-
 static void ApolloMediaComposerInstallComposeTableHooks(void) {
     Class cls = objc_getClass("_TtC6Apollo25ComposePostViewController");
     if (!cls) {
@@ -2936,17 +3148,13 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
         return;
     }
 
-    SEL numberSelector = @selector(tableView:numberOfRowsInSection:);
     SEL cellSelector = @selector(tableView:cellForRowAtIndexPath:);
-    Method numberMethod = class_getInstanceMethod(cls, numberSelector);
     Method cellMethod = class_getInstanceMethod(cls, cellSelector);
-    if (!numberMethod || !cellMethod) {
-        ApolloLog(@"[MediaPostBody] compose table hook skipped: required methods number=%@ cell=%@",
-            numberMethod ? @"yes" : @"no", cellMethod ? @"yes" : @"no");
+    if (!cellMethod) {
+        ApolloLog(@"[MediaPostBody] compose table hook skipped: cell method missing");
         return;
     }
 
-    orig_ApolloCompose_tableView_numberOfRowsInSection = (NSInteger (*)(id, SEL, UITableView *, NSInteger))method_setImplementation(numberMethod, (IMP)hooked_ApolloCompose_tableView_numberOfRowsInSection);
     orig_ApolloCompose_tableView_cellForRowAtIndexPath = (UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))method_setImplementation(cellMethod, (IMP)hooked_ApolloCompose_tableView_cellForRowAtIndexPath);
 
     BOOL heightHook = NO;
@@ -2965,15 +3173,8 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
         estimatedHook = YES;
     }
 
-    SEL didSelectSelector = @selector(tableView:didSelectRowAtIndexPath:);
-    Method didSelectMethod = class_getInstanceMethod(cls, didSelectSelector);
-    if (didSelectMethod) {
-        orig_ApolloCompose_tableView_didSelectRowAtIndexPath = (void (*)(id, SEL, UITableView *, NSIndexPath *))method_setImplementation(didSelectMethod, (IMP)hooked_ApolloCompose_tableView_didSelectRowAtIndexPath);
-        sApolloMediaComposerDidSelectHookInstalled = YES;
-    }
-
-    ApolloLog(@"[MediaPostBody] compose title-control hooks installed required=yes height=%@ estimated=%@ didSelect=%@",
-        heightHook ? @"yes" : @"skip", estimatedHook ? @"yes" : @"skip", sApolloMediaComposerDidSelectHookInstalled ? @"yes" : @"tap-fallback");
+    ApolloLog(@"[MediaPostBody] compose title-control hooks installed required=yes height=%@ estimated=%@",
+        heightHook ? @"yes" : @"skip", estimatedHook ? @"yes" : @"skip");
 }
 
 %hook UIViewController
@@ -3069,6 +3270,7 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
         if (!strongController) return;
         if (ApolloMediaComposerInlineBodyPickerIsActive()) return;
         ApolloMediaComposerClearBodyStateForController(strongController, @"compose-exit");
+        ApolloMediaComposerResetTransientScope(@"compose-exit");
     });
 }
 
@@ -3317,6 +3519,7 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
             BOOL wrote = [posterData writeToURL:posterURL options:NSDataWritingAtomic error:&writeError];
             ApolloMediaComposerAttachContextToPosterImage(poster, context);
             ApolloMediaComposerAttachPosterPayload(posterData, context);
+            if (wrote) context[@"posterFileURL"] = posterURL;
             progress.completedUnitCount = 1;
             completionHandler(wrote ? posterURL : nil, wrote ? nil : (writeError ?: [NSError errorWithDomain:@"ApolloMediaComposerVideoBridge" code:6 userInfo:@{NSLocalizedDescriptionKey: @"Could not write selected-video poster file"}]));
         }];

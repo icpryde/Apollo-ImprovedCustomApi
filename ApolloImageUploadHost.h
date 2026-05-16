@@ -9,7 +9,6 @@ extern "C" {
 // Bearer token capture (from outgoing Reddit API requests).
 BOOL ApolloIsAuthorizationHeader(NSString *field);
 void ApolloRedditCaptureBearerTokenFromAuthorization(NSString *authorization, NSString *source);
-void ApolloRedditCaptureBearerTokenFromHeaderDictionary(NSDictionary *headers, NSString *source);
 void ApolloRedditCaptureBearerTokenFromRequest(NSURLRequest *request, NSString *source);
 
 // Request rewriting. Returns nil if the request should be passed through unchanged.

@@ -119,6 +119,14 @@ static id ApolloObjectIvarValue(id object, NSString *name) {
     for (Class cls = [object class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
         Ivar ivar = class_getInstanceVariable(cls, name.UTF8String);
         if (!ivar) continue;
+        // Only follow ivars that are actual ObjC objects. Swift stored
+        // properties of value types (e.g. `String`, `URL`) get registered
+        // under the same name but hold inline bytes — `object_getIvar` will
+        // return those bytes as a fake pointer, and the autorelease/return
+        // path will crash trying to `objc_retain` it. The type encoding for
+        // ObjC objects starts with '@' (e.g. "@", "@\"NSString\"").
+        const char *encoding = ivar_getTypeEncoding(ivar);
+        if (!encoding || encoding[0] != '@') continue;
         @try {
             return object_getIvar(object, ivar);
         } @catch (__unused NSException *exception) {
