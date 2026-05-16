@@ -1,12 +1,116 @@
 #import "ApolloRedditMediaUpload.h"
 #import "ApolloCommon.h"
 
+#import <objc/runtime.h>
+
 static NSString *const ApolloRedditUploadErrorDomain = @"ApolloRedditMediaUpload";
+static char kApolloRedditMediaUploadProgressOperationKey;
 
 static NSError *ApolloRedditUploadError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:ApolloRedditUploadErrorDomain
                                code:code
                            userInfo:@{NSLocalizedDescriptionKey: message ?: @"Reddit media upload failed"}];
+}
+
+static NSError *ApolloRedditUploadCancelledError(void) {
+    return [NSError errorWithDomain:NSURLErrorDomain
+                               code:NSURLErrorCancelled
+                           userInfo:@{NSLocalizedDescriptionKey: @"Reddit media upload was cancelled"}];
+}
+
+@interface ApolloRedditMediaUploadOperation ()
+
+@property (nonatomic, copy, readwrite) NSString *identifier;
+@property (atomic, assign, readwrite, getter=isCancelled) BOOL cancelled;
+@property (nonatomic, strong) NSURLSessionTask *assetTask;
+@property (nonatomic, strong) NSURLSessionTask *storageTask;
+
+- (BOOL)apolloSetAssetTask:(NSURLSessionTask *)task;
+- (BOOL)apolloSetStorageTask:(NSURLSessionTask *)task;
+- (void)apolloClearStorageTask:(NSURLSessionTask *)task;
+
+@end
+
+@implementation ApolloRedditMediaUploadOperation
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _identifier = [NSUUID UUID].UUIDString;
+    }
+    return self;
+}
+
+- (void)cancel {
+    NSURLSessionTask *assetTask = nil;
+    NSURLSessionTask *storageTask = nil;
+    @synchronized (self) {
+        if (self.cancelled) return;
+        self.cancelled = YES;
+        assetTask = self.assetTask;
+        storageTask = self.storageTask;
+        self.assetTask = nil;
+        self.storageTask = nil;
+    }
+    [assetTask cancel];
+    [storageTask cancel];
+}
+
+- (BOOL)apolloSetAssetTask:(NSURLSessionTask *)task {
+    @synchronized (self) {
+        if (self.cancelled) {
+            [task cancel];
+            return NO;
+        }
+        self.assetTask = task;
+        return YES;
+    }
+}
+
+- (BOOL)apolloSetStorageTask:(NSURLSessionTask *)task {
+    @synchronized (self) {
+        if (self.cancelled) {
+            [task cancel];
+            return NO;
+        }
+        self.storageTask = task;
+        return YES;
+    }
+}
+
+- (void)apolloClearStorageTask:(NSURLSessionTask *)task {
+    @synchronized (self) {
+        if (self.storageTask == task) self.storageTask = nil;
+    }
+}
+
+@end
+
+@interface ApolloRedditMediaUploadProgressDelegate : NSObject <NSURLSessionTaskDelegate>
+@end
+
+@implementation ApolloRedditMediaUploadProgressDelegate
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didSendBodyData:(int64_t)bytesSent totalBytesSent:(int64_t)totalBytesSent totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend {
+    ApolloRedditMediaUploadOperation *operation = objc_getAssociatedObject(task, &kApolloRedditMediaUploadProgressOperationKey);
+    ApolloRedditMediaUploadProgress handler = operation.progressHandler;
+    if (!handler || totalBytesExpectedToSend <= 0) return;
+    double progress = MIN(1.0, MAX(0.0, (double)totalBytesSent / (double)totalBytesExpectedToSend));
+    handler(progress, totalBytesSent, totalBytesExpectedToSend);
+}
+
+@end
+
+static NSURLSession *ApolloRedditMediaUploadProgressSession(void) {
+    static NSURLSession *session = nil;
+    static ApolloRedditMediaUploadProgressDelegate *delegate = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+        delegate = [ApolloRedditMediaUploadProgressDelegate new];
+        session = [NSURLSession sessionWithConfiguration:configuration delegate:delegate delegateQueue:nil];
+    });
+    return session;
 }
 
 BOOL ApolloIsImgurImageUploadRequest(NSURLRequest *request) {
@@ -208,7 +312,13 @@ static void ApolloRequestRedditMediaAsset(NSData *imageData,
                                           NSString *mimeType,
                                           NSString *bearerToken,
                                           NSString *userAgent,
+                                          ApolloRedditMediaUploadOperation *operation,
                                           ApolloRedditMediaUploadCompletion completion) {
+    if (operation.cancelled) {
+        completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+        return;
+    }
+
     NSURL *url = [NSURL URLWithString:@"https://oauth.reddit.com/api/media/asset.json"];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.HTTPMethod = @"POST";
@@ -222,6 +332,10 @@ static void ApolloRequestRedditMediaAsset(NSData *imageData,
     ApolloLog(@"[RedditUpload] Requesting media asset for %@ (%@, %lu bytes)", filename, mimeType, (unsigned long)imageData.length);
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (operation.cancelled) {
+            completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+            return;
+        }
         if (error) {
             completion(nil, nil, nil, error);
             return;
@@ -277,15 +391,27 @@ static void ApolloRequestRedditMediaAsset(NSData *imageData,
             return;
         }
 
+        if (operation.cancelled) {
+            completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+            return;
+        }
+
         NSString *s3Boundary = ApolloBoundary();
         NSMutableURLRequest *s3Request = [NSMutableURLRequest requestWithURL:actionURL];
         s3Request.HTTPMethod = @"POST";
         [s3Request setValue:[@"multipart/form-data; boundary=" stringByAppendingString:s3Boundary] forHTTPHeaderField:@"Content-Type"];
-        s3Request.HTTPBody = ApolloMultipartBodyForFields(fields, imageData, filename, mimeType, s3Boundary, YES);
+        NSData *s3Body = ApolloMultipartBodyForFields(fields, imageData, filename, mimeType, s3Boundary, YES);
 
         ApolloLog(@"[RedditUpload] Uploading %@ to Reddit media storage", filename);
 
-        NSURLSessionDataTask *s3Task = [[NSURLSession sharedSession] dataTaskWithRequest:s3Request completionHandler:^(NSData *s3Data, NSURLResponse *s3Response, NSError *s3Error) {
+        __block NSURLSessionUploadTask *s3Task = nil;
+        s3Task = [ApolloRedditMediaUploadProgressSession() uploadTaskWithRequest:s3Request fromData:s3Body completionHandler:^(NSData *s3Data, NSURLResponse *s3Response, NSError *s3Error) {
+            objc_setAssociatedObject(s3Task, &kApolloRedditMediaUploadProgressOperationKey, nil, OBJC_ASSOCIATION_ASSIGN);
+            [operation apolloClearStorageTask:s3Task];
+            if (operation.cancelled) {
+                completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+                return;
+            }
             if (s3Error) {
                 completion(nil, assetID, webSocketURL, s3Error);
                 return;
@@ -305,11 +431,50 @@ static void ApolloRequestRedditMediaAsset(NSData *imageData,
             }
 
             ApolloLog(@"[RedditUpload] Uploaded media: %@ assetID=%@", imageURL.absoluteString, assetID);
+            ApolloRedditMediaUploadProgress handler = operation.progressHandler;
+            if (handler) handler(1.0, (int64_t)s3Body.length, (int64_t)s3Body.length);
             completion(imageURL, assetID, webSocketURL, nil);
         }];
+        objc_setAssociatedObject(s3Task, &kApolloRedditMediaUploadProgressOperationKey, operation, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (![operation apolloSetStorageTask:s3Task]) {
+            objc_setAssociatedObject(s3Task, &kApolloRedditMediaUploadProgressOperationKey, nil, OBJC_ASSOCIATION_ASSIGN);
+            completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+            return;
+        }
         [s3Task resume];
     }];
+    if (![operation apolloSetAssetTask:task]) {
+        completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+        return;
+    }
     [task resume];
+}
+
+ApolloRedditMediaUploadOperation *ApolloUploadMediaDataToRedditCancellable(NSData *mediaData,
+                                                                           NSString *filename,
+                                                                           NSString *mimeType,
+                                                                           NSString *bearerToken,
+                                                                           NSString *userAgent,
+                                                                           ApolloRedditMediaUploadProgress progressHandler,
+                                                                           ApolloRedditMediaUploadCompletion completion) {
+    ApolloRedditMediaUploadOperation *operation = [ApolloRedditMediaUploadOperation new];
+    operation.progressHandler = progressHandler;
+    ApolloRedditMediaUploadCompletion safeCompletion = completion ?: ^(__unused NSURL *mediaURL, __unused NSString *assetID, __unused NSString *webSocketURL, __unused NSError *error) {};
+    if (mediaData.length == 0) {
+        safeCompletion(nil, nil, nil, ApolloRedditUploadError(1, @"Media data was empty"));
+        return operation;
+    }
+    if (bearerToken.length == 0) {
+        safeCompletion(nil, nil, nil, ApolloRedditUploadError(2, @"Apollo has not captured a Reddit bearer token yet"));
+        return operation;
+    }
+
+    NSString *resolvedMIMEType = ApolloMediaMIMETypeForFilename(filename, mimeType);
+    NSString *resolvedFilename = ApolloNormalizedFilename(filename, resolvedMIMEType);
+    NSString *resolvedUserAgent = userAgent.length > 0 ? userAgent : @"Apollo-ImprovedCustomApi/RedditMediaUpload";
+
+    ApolloRequestRedditMediaAsset(mediaData, resolvedFilename, resolvedMIMEType, bearerToken, resolvedUserAgent, operation, safeCompletion);
+    return operation;
 }
 
 void ApolloUploadMediaDataToReddit(NSData *mediaData,
@@ -318,20 +483,7 @@ void ApolloUploadMediaDataToReddit(NSData *mediaData,
                                   NSString *bearerToken,
                                   NSString *userAgent,
                                   ApolloRedditMediaUploadCompletion completion) {
-    if (mediaData.length == 0) {
-        completion(nil, nil, nil, ApolloRedditUploadError(1, @"Media data was empty"));
-        return;
-    }
-    if (bearerToken.length == 0) {
-        completion(nil, nil, nil, ApolloRedditUploadError(2, @"Apollo has not captured a Reddit bearer token yet"));
-        return;
-    }
-
-    NSString *resolvedMIMEType = ApolloMediaMIMETypeForFilename(filename, mimeType);
-    NSString *resolvedFilename = ApolloNormalizedFilename(filename, resolvedMIMEType);
-    NSString *resolvedUserAgent = userAgent.length > 0 ? userAgent : @"Apollo-ImprovedCustomApi/RedditMediaUpload";
-
-    ApolloRequestRedditMediaAsset(mediaData, resolvedFilename, resolvedMIMEType, bearerToken, resolvedUserAgent, completion);
+    ApolloUploadMediaDataToRedditCancellable(mediaData, filename, mimeType, bearerToken, userAgent, nil, completion);
 }
 
 void ApolloUploadImageDataToReddit(NSData *imageData,
