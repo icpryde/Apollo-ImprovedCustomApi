@@ -241,7 +241,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (section) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 6; // 4 text fields + Can't sign in? + Instructions
-        case SectionGeneral: return 7;
+        case SectionGeneral: return 8;
         case SectionMedia: return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars] ? 7 : 6;
         case SectionSubreddits: return 5;
         case SectionAbout: return 3; // GitHub repo link + version + export logs
@@ -544,6 +544,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Open Steam Links in App"
                                                on:[defaults boolForKey:UDKeyOpenLinksInSteamApp]
                                            action:@selector(steamAppSwitchToggled:)];
+        case 7:
+            return [self switchCellWithIdentifier:@"Cell_Gen_TabBarIdle"
+                                            label:@"Tab Bar Re-Expands When Idle"
+                                               on:[defaults boolForKey:UDKeyAutoHideTabBarShowOnIdle]
+                                           action:@selector(autoHideTabBarShowOnIdleSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1117,6 +1122,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)filterNSFWRecentlyReadSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyFilterNSFWRecentlyRead];
+}
+
+- (void)autoHideTabBarShowOnIdleSwitchToggled:(UISwitch *)sender {
+    sAutoHideTabBarShowOnIdle = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sAutoHideTabBarShowOnIdle forKey:UDKeyAutoHideTabBarShowOnIdle];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloAutoHideTabBarShowOnIdleChangedNotification" object:nil];
 }
 
 - (void)proxyImgurDDGSwitchToggled:(UISwitch *)sender {
