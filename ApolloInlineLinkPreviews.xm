@@ -160,14 +160,18 @@ static BOOL ApolloLPShouldDeferToInlineMedia(NSURL *url) {
     return NO;
 }
 
-static NSDictionary *ApolloLPNodeBundleForHost(ASDisplayNode *hostNode, NSURL *url) {
+static NSString *ApolloLPBundleKey(NSURL *url, NSString *variant) {
+    return [NSString stringWithFormat:@"%@|%@", url.absoluteString ?: @"", variant ?: @"default"];
+}
+
+static NSDictionary *ApolloLPNodeBundleForHost(ASDisplayNode *hostNode, NSURL *url, NSString *variant) {
     NSMutableDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(hostNode, &kApolloLinkPreviewNodesKey);
     if (!bundles) {
         bundles = [NSMutableDictionary dictionary];
         objc_setAssociatedObject(hostNode, &kApolloLinkPreviewNodesKey, bundles, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    NSString *key = url.absoluteString ?: @"";
+    NSString *key = ApolloLPBundleKey(url, variant);
     NSDictionary *bundle = bundles[key];
     if (bundle) return bundle;
 
@@ -252,6 +256,19 @@ typedef NS_ENUM(NSUInteger, ApolloLPContext) {
     ApolloLPContextSelfText = 1,
 };
 
+static BOOL ApolloLPShouldForceHeroForURL(NSURL *url);
+
+static BOOL ApolloLPModeEnabled(void) {
+    return sLinkPreviewMode != ApolloLinkPreviewModeOff;
+}
+
+static ApolloLPContext ApolloLPContextForMode(NSURL *url, ApolloLPContext naturalContext, ApolloLinkPreview *preview) {
+    if (sLinkPreviewMode == ApolloLinkPreviewModeCompact) return ApolloLPContextCompact;
+    if (preview.imageIsFallbackIcon) return ApolloLPContextCompact;
+    if (ApolloLPShouldForceHeroForURL(url)) return ApolloLPContextSelfText;
+    return naturalContext;
+}
+
 static id ApolloLPModelFromNodeIvar(ASDisplayNode *node, const char *ivarName) {
     if (!node || !ivarName) return nil;
     Ivar ivar = class_getInstanceVariable([node class], ivarName);
@@ -302,8 +319,8 @@ static BOOL ApolloLPShouldForceHeroForURL(NSURL *url) {
     return NO;
 }
 
-static NSDictionary *ApolloLPPreparedNodeBundle(ASDisplayNode *hostNode, NSURL *url, ApolloLinkPreview *preview) {
-    NSDictionary *bundle = ApolloLPNodeBundleForHost(hostNode, url);
+static NSDictionary *ApolloLPPreparedNodeBundle(ASDisplayNode *hostNode, NSURL *url, ApolloLinkPreview *preview, NSString *variant) {
+    NSDictionary *bundle = ApolloLPNodeBundleForHost(hostNode, url, variant);
     if (!bundle) return nil;
 
     ASNetworkImageNode *imageNode = bundle[@"image"];
@@ -314,6 +331,7 @@ static NSDictionary *ApolloLPPreparedNodeBundle(ASDisplayNode *hostNode, NSURL *
 
     NSString *siteName = preview.siteName.length > 0 ? preview.siteName : ApolloLPHost(url);
     imageNode.URL = preview.imageURL;
+    imageNode.backgroundColor = preview.imageURL.absoluteString.length > 0 ? nil : [UIColor tertiarySystemFillColor];
     siteNode.attributedText = ApolloLPAttributedString([siteName uppercaseString], [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold], [UIColor secondaryLabelColor]);
     titleNode.attributedText = ApolloLPAttributedString(preview.title, [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold], [UIColor labelColor]);
     descriptionNode.attributedText = ApolloLPAttributedString(preview.desc, [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular], [UIColor secondaryLabelColor]);
@@ -330,7 +348,7 @@ static id ApolloLPBackgroundWrappedSpec(id contentSpec, ASDisplayNode *backgroun
 }
 
 static id ApolloLPBuildCompactCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloLinkPreview *preview) {
-    NSDictionary *bundle = ApolloLPPreparedNodeBundle(hostNode, url, preview);
+    NSDictionary *bundle = ApolloLPPreparedNodeBundle(hostNode, url, preview, @"compact");
     if (!bundle) return nil;
 
     ASNetworkImageNode *imageNode = bundle[@"image"];
@@ -345,8 +363,9 @@ static id ApolloLPBuildCompactCardSpec(ASDisplayNode *hostNode, NSURL *url, Apol
     if (!stackClass || !insetClass) return nil;
 
     imageNode.cornerRadius = 8.0;
-    titleNode.maximumNumberOfLines = 4;
-    descriptionNode.maximumNumberOfLines = 4;
+    ApolloLPClearStyleSize([imageNode style]);
+    titleNode.maximumNumberOfLines = 3;
+    descriptionNode.maximumNumberOfLines = 5;
 
     NSMutableArray *textChildren = [NSMutableArray array];
     if (siteNode.attributedText.length > 0) [textChildren addObject:siteNode];
@@ -382,19 +401,17 @@ static id ApolloLPBuildCompactCardSpec(ASDisplayNode *hostNode, NSURL *url, Apol
 }
 
 static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloLinkPreview *preview) {
-    NSDictionary *bundle = ApolloLPPreparedNodeBundle(hostNode, url, preview);
+    NSDictionary *bundle = ApolloLPPreparedNodeBundle(hostNode, url, preview, @"hero");
     if (!bundle) return nil;
 
     ASNetworkImageNode *imageNode = bundle[@"image"];
     ASTextNode *siteNode = bundle[@"site"];
     ASTextNode *titleNode = bundle[@"title"];
     ASTextNode *descriptionNode = bundle[@"description"];
-    ASDisplayNode *backgroundNode = bundle[@"background"];
 
     Class stackClass = ApolloLPClass(@"ASStackLayoutSpec");
     Class insetClass = ApolloLPClass(@"ASInsetLayoutSpec");
     Class ratioClass = ApolloLPClass(@"ASRatioLayoutSpec");
-    Class backgroundClass = ApolloLPClass(@"ASBackgroundLayoutSpec");
     if (!stackClass || !insetClass) return nil;
 
     imageNode.cornerRadius = 10.0;
@@ -404,9 +421,6 @@ static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloL
     titleNode.maximumNumberOfLines = isYouTube ? 3 : 4;
     descriptionNode.maximumNumberOfLines = isYouTube ? 2 : 4;
     titleNode.attributedText = ApolloLPAttributedString(preview.title, [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold], [UIColor labelColor]);
-    backgroundNode.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    backgroundNode.cornerRadius = 12.0;
-    backgroundNode.clipsToBounds = YES;
 
     NSMutableArray *textChildren = [NSMutableArray array];
     if (siteNode.attributedText.length > 0) [textChildren addObject:siteNode];
@@ -442,10 +456,77 @@ static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloL
                                                              justifyContent:ApolloLinkPreviewStackJustifyContentStart
                                                                  alignItems:ApolloLinkPreviewStackAlignItemsStretch
                                                                    children:cardChildren];
-    // Outer 4pt horizontal inset gives the card a small gutter from the body
-    // content edges so the image isn't perfectly flush with the screen.
-    id card = ApolloLPBackgroundWrappedSpec(cardStack, backgroundNode, backgroundClass);
-    return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(6.0, 4.0, 6.0, 4.0) child:card];
+    // Keep the outer wrapper transparent so hero previews sit directly in the
+    // post/comment surface instead of looking like a second grey card.
+    return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(6.0, 4.0, 6.0, 4.0) child:cardStack];
+}
+
+static id ApolloLPBuildPlaceholderSpec(ASDisplayNode *hostNode, NSURL *url, ApolloLPContext context) {
+    ApolloLinkPreview *preview = [ApolloLinkPreview new];
+    preview.siteName = ApolloLPHost(url);
+    preview.title = @" ";
+    preview.desc = context == ApolloLPContextSelfText ? @" " : nil;
+
+    NSDictionary *bundle = ApolloLPPreparedNodeBundle(hostNode, url, preview, context == ApolloLPContextSelfText ? @"placeholder-hero" : @"placeholder-compact");
+    if (!bundle) return nil;
+
+    ASNetworkImageNode *imageNode = bundle[@"image"];
+    ASTextNode *siteNode = bundle[@"site"];
+    ASTextNode *titleNode = bundle[@"title"];
+    ASTextNode *descriptionNode = bundle[@"description"];
+    ASDisplayNode *backgroundNode = bundle[@"background"];
+
+    Class stackClass = ApolloLPClass(@"ASStackLayoutSpec");
+    Class insetClass = ApolloLPClass(@"ASInsetLayoutSpec");
+    Class ratioClass = ApolloLPClass(@"ASRatioLayoutSpec");
+    Class backgroundClass = ApolloLPClass(@"ASBackgroundLayoutSpec");
+    if (!stackClass || !insetClass) return nil;
+
+    UIColor *placeholder = [UIColor tertiarySystemFillColor];
+    imageNode.URL = nil;
+    imageNode.backgroundColor = placeholder;
+    imageNode.cornerRadius = context == ApolloLPContextSelfText ? 10.0 : 8.0;
+    siteNode.attributedText = ApolloLPAttributedString([preview.siteName uppercaseString], [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold], [UIColor secondaryLabelColor]);
+    titleNode.attributedText = ApolloLPAttributedString(@"     ", [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold], placeholder);
+    descriptionNode.attributedText = ApolloLPAttributedString(@"          ", [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular], placeholder);
+
+    if (context == ApolloLPContextSelfText && ratioClass) {
+        NSMutableArray *children = [NSMutableArray array];
+        ApolloLPClearStyleSize([imageNode style]);
+        [children addObject:[ratioClass ratioLayoutSpecWithRatio:9.0 / 16.0 child:imageNode]];
+
+        ASStackLayoutSpec *textStack = [stackClass stackLayoutSpecWithDirection:ApolloLinkPreviewStackDirectionVertical
+                                                                        spacing:4.0
+                                                                 justifyContent:ApolloLinkPreviewStackJustifyContentStart
+                                                                     alignItems:ApolloLinkPreviewStackAlignItemsStretch
+                                                                       children:@[siteNode, titleNode, descriptionNode]];
+        [children addObject:[insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(8.0, 12.0, 10.0, 12.0) child:textStack]];
+
+        ASStackLayoutSpec *cardStack = [stackClass stackLayoutSpecWithDirection:ApolloLinkPreviewStackDirectionVertical
+                                                                        spacing:0.0
+                                                                 justifyContent:ApolloLinkPreviewStackJustifyContentStart
+                                                                     alignItems:ApolloLinkPreviewStackAlignItemsStretch
+                                                                       children:children];
+        return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(6.0, 4.0, 6.0, 4.0) child:cardStack];
+    }
+
+    ApolloLPApplyStyleSize([imageNode style], CGSizeMake(84.0, 84.0));
+    titleNode.maximumNumberOfLines = 1;
+    ASStackLayoutSpec *textStack = [stackClass stackLayoutSpecWithDirection:ApolloLinkPreviewStackDirectionVertical
+                                                                    spacing:3.0
+                                                             justifyContent:ApolloLinkPreviewStackJustifyContentStart
+                                                                 alignItems:ApolloLinkPreviewStackAlignItemsStretch
+                                                                   children:@[siteNode, titleNode]];
+    [[textStack style] setValue:@1.0 forKey:@"flexGrow"];
+    [[textStack style] setValue:@1.0 forKey:@"flexShrink"];
+    ASStackLayoutSpec *row = [stackClass stackLayoutSpecWithDirection:ApolloLinkPreviewStackDirectionHorizontal
+                                                              spacing:10.0
+                                                       justifyContent:ApolloLinkPreviewStackJustifyContentStart
+                                                           alignItems:ApolloLinkPreviewStackAlignItemsStart
+                                                             children:@[imageNode, textStack]];
+    backgroundNode.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    id card = ApolloLPBackgroundWrappedSpec([insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(10.0, 10.0, 10.0, 10.0) child:row], backgroundNode, backgroundClass);
+    return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(4.0, 0.0, 4.0, 0.0) child:card];
 }
 
 static void ApolloLPTriggerRelayout(ASDisplayNode *node) {
@@ -484,7 +565,7 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
 %hook _TtC6Apollo14LinkButtonNode
 
 - (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
-    if (!sEnableLinkPreviews) {
+    if (!ApolloLPModeEnabled()) {
         ApolloLPLogOncePerHost(@"(any)", @"hook-disabled");
         return %orig;
     }
@@ -509,6 +590,7 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
 
     ApolloLinkPreview *cached = [[ApolloLinkPreviewCache sharedCache] cachedPreviewForURL:url];
     if (!cached) {
+        ApolloLPContext placeholderContext = ApolloLPContextForMode(url, ApolloLPContextForLinkButton((ASDisplayNode *)self), [ApolloLinkPreview new]);
         NSNumber *inFlight = objc_getAssociatedObject(self, &kApolloLinkPreviewFetchInFlightKey);
         if (![inFlight boolValue]) {
             ApolloLPLogOncePerHost(host, @"cache-miss-fetch");
@@ -523,6 +605,11 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
                 });
             }];
         }
+        id placeholder = ApolloLPBuildPlaceholderSpec((ASDisplayNode *)self, url, placeholderContext);
+        if (placeholder) {
+            ApolloLPLogOncePerHost(host, placeholderContext == ApolloLPContextSelfText ? @"render-hero-placeholder" : @"render-compact-placeholder");
+            return placeholder;
+        }
         return %orig;
     }
 
@@ -531,17 +618,14 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
         return %orig;
     }
 
-    ApolloLPContext context = ApolloLPContextForLinkButton((ASDisplayNode *)self);
-    BOOL forceHero = ApolloLPShouldForceHeroForURL(url);
+    ApolloLPContext context = ApolloLPContextForMode(url, ApolloLPContextForLinkButton((ASDisplayNode *)self), cached);
     if (cached.imageIsFallbackIcon) {
         ApolloLPLogOncePerHost(host, @"fallback-icon-compact");
-        context = ApolloLPContextCompact;
-    } else if (forceHero) {
+    } else if (ApolloLPShouldForceHeroForURL(url) && sLinkPreviewMode == ApolloLinkPreviewModeFull) {
         if (cached.imageURL.absoluteString.length == 0) {
             ApolloLPLogOncePerHost(host, @"force-hero-missing-image");
             return %orig;
         }
-        context = ApolloLPContextSelfText;
     }
     id richSpec = (context == ApolloLPContextSelfText)
         ? ApolloLPBuildHeroCardSpec((ASDisplayNode *)self, url, cached)
@@ -557,8 +641,8 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
 %end
 
 %ctor {
-    ApolloLog(@"[LinkPreviews] ctor: hook installed for _TtC6Apollo14LinkButtonNode toggle=%@",
-              sEnableLinkPreviews ? @"YES" : @"NO");
+    ApolloLog(@"[LinkPreviews] ctor: hook installed for _TtC6Apollo14LinkButtonNode mode=%ld", (long)sLinkPreviewMode);
     ApolloLog(@"[LinkPreviews] V5 polish active");
     ApolloLog(@"[LinkPreviews] V6 image-kind polish active");
+    ApolloLog(@"[LinkPreviews] V7 display modes and placeholders active");
 }

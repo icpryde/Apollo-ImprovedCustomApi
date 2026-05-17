@@ -887,9 +887,10 @@ static void initializeRandomSources() {
                                     UDKeyUnmuteCommentsVideos: @0,
                                     UDKeyProxyImgurDDG: @NO,
                                     UDKeyEnableInlineImages: @YES,
-                                    UDKeyEnableLinkPreviews: @YES,
+                                    UDKeyLinkPreviewMode: @(ApolloLinkPreviewModeFull),
                                     UDKeyImageUploadProvider: @(ImageUploadProviderImgur),
                                     UDKeyShowUserAvatars: @NO,
+                                    UDKeyUseProfileAvatarTabIcon: @NO,
                                     UDKeyAutoHideTabBarShowOnIdle: @NO,
                                     UDKeyEnableBulkTranslation: @NO,
                                     UDKeyAutoTranslateOnAppear: @YES,
@@ -904,7 +905,18 @@ static void initializeRandomSources() {
                                     UDKeyTagFilterNSFW: @YES,
                                     UDKeyTagFilterSpoiler: @YES,
                                     UDKeyTagFilterSubredditOverrides: @{}};
+    NSUserDefaults *standardDefaults = [NSUserDefaults standardUserDefaults];
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaultValues];
+
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSDictionary *persistentDomain = bundleID.length > 0 ? [standardDefaults persistentDomainForName:bundleID] : nil;
+    if (![persistentDomain objectForKey:UDKeyLinkPreviewMode]) {
+        id legacyToggle = [persistentDomain objectForKey:UDKeyEnableLinkPreviews];
+        NSInteger migratedMode = (![legacyToggle respondsToSelector:@selector(boolValue)] || [legacyToggle boolValue])
+            ? ApolloLinkPreviewModeFull
+            : ApolloLinkPreviewModeOff;
+        [standardDefaults setInteger:migratedMode forKey:UDKeyLinkPreviewMode];
+    }
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
     sImgurClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyImgurClientId] ?: @"" copy];
@@ -917,10 +929,15 @@ static void initializeRandomSources() {
     sUnmuteCommentsVideos = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyUnmuteCommentsVideos];
     sProxyImgurDDG = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG];
     sEnableInlineImages = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableInlineImages];
-    sEnableLinkPreviews = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableLinkPreviews];
-    ApolloLog(@"[LinkPreviews] settings loaded toggle=%@", sEnableLinkPreviews ? @"YES" : @"NO");
+    sLinkPreviewMode = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyLinkPreviewMode];
+    if (sLinkPreviewMode < ApolloLinkPreviewModeOff || sLinkPreviewMode > ApolloLinkPreviewModeFull) {
+        sLinkPreviewMode = ApolloLinkPreviewModeFull;
+        [standardDefaults setInteger:sLinkPreviewMode forKey:UDKeyLinkPreviewMode];
+    }
+    ApolloLog(@"[LinkPreviews] settings loaded mode=%ld", (long)sLinkPreviewMode);
     sImageUploadProvider = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyImageUploadProvider];
     sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
+    sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
     sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
     sEnableBulkTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableBulkTranslation];
     sAutoTranslateOnAppear = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoTranslateOnAppear];
@@ -931,9 +948,6 @@ static void initializeRandomSources() {
 
     // Provider: only "google" or "libre" are supported. Migrate any older
     // "apple" value to "google" so existing users land on a working provider.
-    NSUserDefaults *standardDefaults = [NSUserDefaults standardUserDefaults];
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    NSDictionary *persistentDomain = bundleID.length > 0 ? [standardDefaults persistentDomainForName:bundleID] : nil;
     id providerValue = [persistentDomain objectForKey:UDKeyTranslationProvider];
     NSString *provider = [providerValue isKindOfClass:[NSString class]] ? (NSString *)providerValue : nil;
 

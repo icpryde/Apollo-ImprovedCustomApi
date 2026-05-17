@@ -20,6 +20,7 @@ static NSString *const UDKeyFilterNSFWRecentlyRead = @"FilterNSFWRecentlyRead";
 static NSString *const UDKeyProxyImgurDDG = @"ProxyImgurDDG";
 static NSString *const UDKeyImageUploadProvider = @"ImageUploadProvider";
 static NSString *const UDKeyShowUserAvatars = @"ShowUserAvatars";
+static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon";
 static NSString *const UDKeyAutoHideTabBarShowOnIdle = @"AutoHideTabBarShowOnIdle";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)
 // inline within post selftext and comments instead of leaving them as plain text links.
@@ -52,5 +53,7 @@ static NSString *const UDKeyTagFilterSpoiler = @"TagFilterSpoiler";        // gl
 // Missing keys fall back to global settings.
 static NSString *const UDKeyTagFilterSubredditOverrides = @"TagFilterSubredditOverrides";
 
-// Rich link preview cards (title, image, description) for external URLs.
+// Legacy boolean key from the first rich link preview builds. Kept only for migration.
 static NSString *const UDKeyEnableLinkPreviews = @"EnableLinkPreviews";
+// Rich link preview cards: 0 = Off, 1 = Compact, 2 = Full.
+static NSString *const UDKeyLinkPreviewMode = @"LinkPreviewMode";

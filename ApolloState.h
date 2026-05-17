@@ -20,14 +20,21 @@ extern NSInteger sUnmuteCommentsVideos;
 
 extern BOOL sProxyImgurDDG;
 extern BOOL sShowUserAvatars;
+extern BOOL sUseProfileAvatarTabIcon;
 extern BOOL sAutoHideTabBarShowOnIdle;
 
 // Render image URLs inline in post selftext and comments. Defaults to YES on
 // fresh installs (registerDefaults). When NO, Apollo's native behavior (text
 // link + optional link card) is preserved. See ApolloInlineImages.xm.
 extern BOOL sEnableInlineImages;
+typedef NS_ENUM(NSInteger, ApolloLinkPreviewMode) {
+    ApolloLinkPreviewModeOff = 0,
+    ApolloLinkPreviewModeCompact = 1,
+    ApolloLinkPreviewModeFull = 2,
+};
+
 // Rich link previews (Open Graph / oEmbed) for link cards in posts and comments.
-extern BOOL sEnableLinkPreviews;
+extern NSInteger sLinkPreviewMode;
 
 // Media upload host selection. Imgur is the default; Reddit uses Apollo's signed-in
 // session to upload directly to Reddit's media storage.
