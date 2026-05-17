@@ -94,6 +94,7 @@ struct CDStruct_90e057aa { CGSize min; CGSize max; };
 
 static char kApolloLinkPreviewNodesKey;
 static char kApolloLinkPreviewFetchInFlightKey;
+static char kApolloLinkPreviewOriginalHostShellKey;
 
 static Class ApolloLPClass(NSString *name) {
     return NSClassFromString(name);
@@ -251,6 +252,35 @@ static void ApolloLPClearStyleSize(id style) {
     }
 }
 
+static void ApolloLPClearHostShell(ASDisplayNode *node) {
+    if (!node) return;
+
+    NSDictionary *original = objc_getAssociatedObject(node, &kApolloLinkPreviewOriginalHostShellKey);
+    if (!original) {
+        original = @{
+            @"background": node.backgroundColor ?: [NSNull null],
+            @"cornerRadius": @(node.cornerRadius),
+            @"clipsToBounds": @(node.clipsToBounds),
+        };
+        objc_setAssociatedObject(node, &kApolloLinkPreviewOriginalHostShellKey, original, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    node.backgroundColor = [UIColor clearColor];
+    node.cornerRadius = 0.0;
+    node.clipsToBounds = NO;
+}
+
+static void ApolloLPRestoreHostShell(ASDisplayNode *node) {
+    if (!node) return;
+    NSDictionary *original = objc_getAssociatedObject(node, &kApolloLinkPreviewOriginalHostShellKey);
+    if (!original) return;
+
+    id background = original[@"background"];
+    node.backgroundColor = [background isKindOfClass:[NSNull class]] ? nil : background;
+    node.cornerRadius = [original[@"cornerRadius"] doubleValue];
+    node.clipsToBounds = [original[@"clipsToBounds"] boolValue];
+}
+
 typedef NS_ENUM(NSUInteger, ApolloLPContext) {
     ApolloLPContextCompact = 0,
     ApolloLPContextSelfText = 1,
@@ -285,15 +315,11 @@ static id ApolloLPModelFromNodeIvar(ASDisplayNode *node, const char *ivarName) {
 }
 
 static ApolloLPContext ApolloLPContextForLinkButton(ASDisplayNode *linkButtonNode) {
-    BOOL sawLink = NO;
     for (ASDisplayNode *node = linkButtonNode; node; node = node.supernode) {
         id comment = ApolloLPModelFromNodeIvar(node, "comment");
         if (comment) return ApolloLPContextCompact;
-
-        id link = ApolloLPModelFromNodeIvar(node, "link");
-        if (link) sawLink = YES;
     }
-    return sawLink ? ApolloLPContextSelfText : ApolloLPContextCompact;
+    return ApolloLPContextSelfText;
 }
 
 // Some hosts always look better as a hero (large thumbnail on top) regardless
@@ -366,6 +392,9 @@ static id ApolloLPBuildCompactCardSpec(ASDisplayNode *hostNode, NSURL *url, Apol
     ApolloLPClearStyleSize([imageNode style]);
     titleNode.maximumNumberOfLines = 3;
     descriptionNode.maximumNumberOfLines = 5;
+    backgroundNode.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    backgroundNode.cornerRadius = 10.0;
+    backgroundNode.clipsToBounds = YES;
 
     NSMutableArray *textChildren = [NSMutableArray array];
     if (siteNode.attributedText.length > 0) [textChildren addObject:siteNode];
@@ -408,10 +437,12 @@ static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloL
     ASTextNode *siteNode = bundle[@"site"];
     ASTextNode *titleNode = bundle[@"title"];
     ASTextNode *descriptionNode = bundle[@"description"];
+    ASDisplayNode *backgroundNode = bundle[@"background"];
 
     Class stackClass = ApolloLPClass(@"ASStackLayoutSpec");
     Class insetClass = ApolloLPClass(@"ASInsetLayoutSpec");
     Class ratioClass = ApolloLPClass(@"ASRatioLayoutSpec");
+    Class backgroundClass = ApolloLPClass(@"ASBackgroundLayoutSpec");
     if (!stackClass || !insetClass) return nil;
 
     imageNode.cornerRadius = 10.0;
@@ -421,6 +452,9 @@ static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloL
     titleNode.maximumNumberOfLines = isYouTube ? 3 : 4;
     descriptionNode.maximumNumberOfLines = isYouTube ? 2 : 4;
     titleNode.attributedText = ApolloLPAttributedString(preview.title, [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold], [UIColor labelColor]);
+    backgroundNode.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    backgroundNode.cornerRadius = 10.0;
+    backgroundNode.clipsToBounds = YES;
 
     NSMutableArray *textChildren = [NSMutableArray array];
     if (siteNode.attributedText.length > 0) [textChildren addObject:siteNode];
@@ -456,9 +490,8 @@ static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloL
                                                              justifyContent:ApolloLinkPreviewStackJustifyContentStart
                                                                  alignItems:ApolloLinkPreviewStackAlignItemsStretch
                                                                    children:cardChildren];
-    // Keep the outer wrapper transparent so hero previews sit directly in the
-    // post/comment surface instead of looking like a second grey card.
-    return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(6.0, 4.0, 6.0, 4.0) child:cardStack];
+    id card = ApolloLPBackgroundWrappedSpec(cardStack, backgroundNode, backgroundClass);
+    return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(6.0, 0.0, 6.0, 0.0) child:card];
 }
 
 static id ApolloLPBuildPlaceholderSpec(ASDisplayNode *hostNode, NSURL *url, ApolloLPContext context) {
@@ -507,7 +540,11 @@ static id ApolloLPBuildPlaceholderSpec(ASDisplayNode *hostNode, NSURL *url, Apol
                                                                  justifyContent:ApolloLinkPreviewStackJustifyContentStart
                                                                      alignItems:ApolloLinkPreviewStackAlignItemsStretch
                                                                        children:children];
-        return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(6.0, 4.0, 6.0, 4.0) child:cardStack];
+        backgroundNode.backgroundColor = [UIColor secondarySystemBackgroundColor];
+        backgroundNode.cornerRadius = 10.0;
+        backgroundNode.clipsToBounds = YES;
+        id card = ApolloLPBackgroundWrappedSpec(cardStack, backgroundNode, backgroundClass);
+        return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(6.0, 0.0, 6.0, 0.0) child:card];
     }
 
     ApolloLPApplyStyleSize([imageNode style], CGSizeMake(84.0, 84.0));
@@ -525,6 +562,8 @@ static id ApolloLPBuildPlaceholderSpec(ASDisplayNode *hostNode, NSURL *url, Apol
                                                            alignItems:ApolloLinkPreviewStackAlignItemsStart
                                                              children:@[imageNode, textStack]];
     backgroundNode.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    backgroundNode.cornerRadius = 10.0;
+    backgroundNode.clipsToBounds = YES;
     id card = ApolloLPBackgroundWrappedSpec([insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(10.0, 10.0, 10.0, 10.0) child:row], backgroundNode, backgroundClass);
     return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(4.0, 0.0, 4.0, 0.0) child:card];
 }
@@ -567,6 +606,7 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
 - (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
     if (!ApolloLPModeEnabled()) {
         ApolloLPLogOncePerHost(@"(any)", @"hook-disabled");
+        ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
 
@@ -574,6 +614,7 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
     NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
     if (!url) {
         ApolloLPLogOncePerHost(NSStringFromClass([(id)self class]), @"no-url");
+        ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
 
@@ -581,10 +622,12 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
 
     if (ApolloLPShouldDeferToInlineMedia(url)) {
         ApolloLPLogOncePerHost(host, @"defer-inline-media");
+        ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
     if ([ApolloLinkPreviewFetcher isTwitterURL:url]) {
         ApolloLPLogOncePerHost(host, @"defer-twitter");
+        ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
 
@@ -607,14 +650,18 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
         }
         id placeholder = ApolloLPBuildPlaceholderSpec((ASDisplayNode *)self, url, placeholderContext);
         if (placeholder) {
+            ApolloLPClearHostShell((ASDisplayNode *)self);
+            ApolloLPLogOncePerHost(host, placeholderContext == ApolloLPContextSelfText ? @"context-full-placeholder" : @"context-compact-placeholder");
             ApolloLPLogOncePerHost(host, placeholderContext == ApolloLPContextSelfText ? @"render-hero-placeholder" : @"render-compact-placeholder");
             return placeholder;
         }
+        ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
 
     if (![cached hasUsefulMetadata]) {
         ApolloLPLogOncePerHost(host, @"cache-hit-empty");
+        ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
 
@@ -624,6 +671,7 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
     } else if (ApolloLPShouldForceHeroForURL(url) && sLinkPreviewMode == ApolloLinkPreviewModeFull) {
         if (cached.imageURL.absoluteString.length == 0) {
             ApolloLPLogOncePerHost(host, @"force-hero-missing-image");
+            ApolloLPRestoreHostShell((ASDisplayNode *)self);
             return %orig;
         }
     }
@@ -631,10 +679,13 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
         ? ApolloLPBuildHeroCardSpec((ASDisplayNode *)self, url, cached)
         : ApolloLPBuildCompactCardSpec((ASDisplayNode *)self, url, cached);
     if (richSpec) {
+        ApolloLPClearHostShell((ASDisplayNode *)self);
+        ApolloLPLogOncePerHost(host, context == ApolloLPContextSelfText ? @"context-full" : @"context-compact");
         ApolloLPLogOncePerHost(host, context == ApolloLPContextSelfText ? @"render-hero" : @"render-compact");
         return richSpec;
     }
     ApolloLPLogOncePerHost(host, @"build-failed");
+    ApolloLPRestoreHostShell((ASDisplayNode *)self);
     return %orig;
 }
 
@@ -645,4 +696,5 @@ static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
     ApolloLog(@"[LinkPreviews] V5 polish active");
     ApolloLog(@"[LinkPreviews] V6 image-kind polish active");
     ApolloLog(@"[LinkPreviews] V7 display modes and placeholders active");
+    ApolloLog(@"[LinkPreviews] V8 borderless cards active");
 }
