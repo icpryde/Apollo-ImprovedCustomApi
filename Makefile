@@ -35,6 +35,7 @@ ApolloImprovedCustomApi_FILES = \
     ApolloTranslation.xm \
     ApolloVideoUnmute.xm \
     ApolloVideoSwipeFix.xm \
+    ApolloSubredditIndexPolish.xm \
     ApolloTagFilters.xm \
     ApolloInlineImages.xm \
     CustomAPIViewController.m \
