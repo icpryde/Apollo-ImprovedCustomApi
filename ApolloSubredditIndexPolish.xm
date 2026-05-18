@@ -49,6 +49,25 @@ static UIViewController *ApolloSubredditIndexOwningViewController(UIView *view) 
     return nil;
 }
 
+static UIColor *ApolloSubredditIndexThemeAccentColor(UITableView *tableView, UIView *fallbackView) {
+    UIViewController *viewController = ApolloSubredditIndexOwningViewController(tableView ?: fallbackView);
+    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
+
+    if (viewController.tabBarController.tabBar.tintColor) [candidates addObject:viewController.tabBarController.tabBar.tintColor];
+    if (viewController.navigationController.navigationBar.tintColor) [candidates addObject:viewController.navigationController.navigationBar.tintColor];
+    if (viewController.view.tintColor) [candidates addObject:viewController.view.tintColor];
+    if (tableView.tintColor) [candidates addObject:tableView.tintColor];
+    if (fallbackView.tintColor) [candidates addObject:fallbackView.tintColor];
+    if (tableView.window.tintColor) [candidates addObject:tableView.window.tintColor];
+    if (fallbackView.window.tintColor) [candidates addObject:fallbackView.window.tintColor];
+
+    for (UIColor *color in candidates) {
+        if ([color isKindOfClass:[UIColor class]]) return color;
+    }
+
+    return fallbackView.tintColor ?: tableView.tintColor ?: [UIColor systemBlueColor];
+}
+
 static NSArray<NSString *> *ApolloSubredditIndexTitlesForTable(UITableView *tableView) {
     id<UITableViewDataSource> dataSource = tableView.dataSource;
     if (!dataSource || ![dataSource respondsToSelector:@selector(sectionIndexTitlesForTableView:)]) return nil;
@@ -366,6 +385,18 @@ static CGRect ApolloSubredditIndexProxyFrameForCell(UITableViewCell *cell, UICon
     return self;
 }
 
+- (void)apollo_applyThemeTintToLabels {
+    UIColor *accentColor = ApolloSubredditIndexThemeAccentColor(self.tableView, self);
+    for (UILabel *label in self.labels) {
+        label.textColor = accentColor;
+    }
+}
+
+- (void)tintColorDidChange {
+    [super tintColorDidChange];
+    [self apollo_applyThemeTintToLabels];
+}
+
 - (void)updateWithTableView:(UITableView *)tableView titles:(NSArray<NSString *> *)titles {
     self.tableView = tableView;
     self.titles = titles ?: @[];
@@ -381,7 +412,6 @@ static CGRect ApolloSubredditIndexProxyFrameForCell(UITableViewCell *cell, UICon
             label.text = title;
             label.textAlignment = NSTextAlignmentRight;
             label.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
-            label.textColor = [UIColor systemPurpleColor];
             label.adjustsFontSizeToFitWidth = YES;
             label.minimumScaleFactor = 0.65;
             label.layer.anchorPoint = CGPointMake(1.0, 0.5);
@@ -395,6 +425,7 @@ static CGRect ApolloSubredditIndexProxyFrameForCell(UITableViewCell *cell, UICon
         }];
     }
 
+    [self apollo_applyThemeTintToLabels];
     [self setNeedsLayout];
     [self applyMagnificationForIndex:self.activeIndex animated:NO];
 }
@@ -748,7 +779,7 @@ static void ApolloSubredditIndexStyleHeaderView(UIView *header, UITableView *tab
     ApolloSubredditIndexClearHeaderBackgrounds(header, label);
     label.text = text;
     label.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
-    label.textColor = [UIColor systemPurpleColor];
+    label.textColor = ApolloSubredditIndexThemeAccentColor(tableView, header);
     label.alpha = 0.9;
     label.backgroundColor = [UIColor clearColor];
     label.layer.backgroundColor = UIColor.clearColor.CGColor;
