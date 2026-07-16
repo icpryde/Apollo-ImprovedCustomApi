@@ -3,7 +3,7 @@
 // Feed / subreddit search-bar behavior under iOS 26 Liquid Glass. One cohesive subsystem (the parts
 // share %hook methods, so they live together):
 //   - Nav-bar hide: when the search field focuses, fully translate the nav bar off-screen (default).
-//   - Round "X" cancel button: a neutral-gray xmark in a circle that slides / fades in and out.
+//   - Native glass "X" cancel button: slides in and out alongside Apollo's existing search lifecycle.
 //   - Search-results offset: pin the feed inset/offset to a stable rest so results don't jump.
 //   - "Keep Search Bar In Place" mode (sKeepSearchBarInPlace, Settings > Apollo Reborn > General):
 //     keep the nav bar + field where they rest and fill the feed with results below.
@@ -40,12 +40,78 @@ static id ApolloObjectIvar(id object, const char *name) {
     return nil;
 }
 
-// MARK: - "Find in Comments" bar (in-thread search) — opaque backing
+// MARK: - Native iOS 26 search glass
+//
+// Apollo's feed/comment search is custom UI (ApolloSearchToolbar + a UITextField), so merely linking
+// Apollo against the iOS 26 SDK cannot give it UIKit's refreshed search appearance. Keep Apollo's actual
+// field, delegate, indexing and result-reload path intact, and add only the system material underneath it.
+// This is the same public UIKit recipe Apple documents for a custom control: UIVisualEffectView +
+// UIGlassEffect. Runtime lookup keeps the shipped tweak's iOS 14 deployment floor clean.
+
+static BOOL ApolloNativeSearchGlassAvailable(void) {
+    return IsLiquidGlass() && NSClassFromString(@"UIGlassEffect") != Nil;
+}
+
+static UIVisualEffect *ApolloNewGlassEffect(BOOL interactive) {
+    Class glassClass = NSClassFromString(@"UIGlassEffect");
+    if (!glassClass) return nil;
+
+    id effect = nil;
+    SEL factory = NSSelectorFromString(@"effectWithStyle:");
+    if ([glassClass respondsToSelector:factory]) {
+        // UIGlassEffectStyleRegular == 0. Use the public factory dynamically so this source still builds
+        // for the real device target's iOS 14 deployment floor.
+        effect = ((id (*)(id, SEL, NSInteger))objc_msgSend)(glassClass, factory, 0);
+    }
+    if (!effect) effect = [[glassClass alloc] init];
+
+    SEL setInteractive = NSSelectorFromString(@"setInteractive:");
+    if ([effect respondsToSelector:setInteractive]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(effect, setInteractive, interactive);
+    }
+    return effect;
+}
+
+static void ApolloUseCapsuleCorners(UIView *view) {
+    Class cornerClass = NSClassFromString(@"UICornerConfiguration");
+    SEL capsuleSelector = NSSelectorFromString(@"capsuleConfiguration");
+    SEL setter = NSSelectorFromString(@"setCornerConfiguration:");
+    if (!view || !cornerClass || ![cornerClass respondsToSelector:capsuleSelector] ||
+        ![view respondsToSelector:setter]) {
+        return;
+    }
+
+    id capsule = ((id (*)(id, SEL))objc_msgSend)(cornerClass, capsuleSelector);
+    ((void (*)(id, SEL, id))objc_msgSend)(view, setter, capsule);
+}
+
+// A real UIButtonConfiguration glass button. Returning id and using runtime selectors avoids importing
+// iOS-15+/26-only button types into the iOS 14 device build while still letting UIKit own the pressed
+// highlight, dynamic contrast and optical glass treatment on iOS 26.
+static id ApolloGlassButtonConfiguration(UIImage *image) {
+    Class configurationClass = NSClassFromString(@"UIButtonConfiguration");
+    SEL glassSelector = NSSelectorFromString(@"glassButtonConfiguration");
+    if (!configurationClass || ![configurationClass respondsToSelector:glassSelector]) return nil;
+
+    id configuration = ((id (*)(id, SEL))objc_msgSend)(configurationClass, glassSelector);
+    if (!configuration) return nil;
+    [configuration setValue:image forKey:@"image"];
+    [configuration setValue:[UIColor labelColor] forKey:@"baseForegroundColor"];
+    [configuration setValue:@1 forKey:@"buttonSize"];  // UIButtonConfigurationSizeSmall
+    [configuration setValue:@4 forKey:@"cornerStyle"]; // UIButtonConfigurationCornerStyleCapsule
+    return configuration;
+}
+
+static const void *kSearchFieldGlassKey = &kSearchFieldGlassKey;
+static const void *kSearchFieldGlassLoggedKey = &kSearchFieldGlassLoggedKey;
+
+// MARK: - "Find in Comments" bar (in-thread search) — shared glass group
 //
 // The in-thread comments search (searchBarShouldStickToKeyboard == YES) is excluded from the feed-search
 // handling above, but its docked find bar is transparent, so the comments behind it bleed through the
-// Done button / chevrons. Detect it (its toolbar belongs to a CommentsViewController) and give it a solid
-// backing only while it's docked (active); restore it (transparent) at its resting pill.
+// Done button / chevrons. Detect it (its toolbar belongs to a CommentsViewController) and give the whole
+// field/checkmark/chevron group one Liquid Glass backing while docked. A single shared surface follows
+// UIKit's toolbar grouping model and avoids stacking a second glass field on top of glass.
 
 // The CommentsViewController that owns a comment find-in-page bar (walk the responder chain), else nil.
 static UIViewController *commentsVCForView(UIView *v) {
@@ -71,23 +137,36 @@ static BOOL toolbarDocked(UIView *toolbar) {
     return sup != nil && ![sup isKindOfClass:[UIScrollView class]];
 }
 
-// Translucent backing for the docked comment find bar: a rounded blur-glass panel (like the Liquid Glass
-// chrome) rather than an opaque fill. Frosts the comments behind it — so it reads as glass, not a flat slab —
-// while keeping Done / Find / the chevrons legible. Inserted backmost (behind the bar's controls,
-// non-interactive) and removed at the resting pill so the resting state is untouched.
-//
-// Tunables (easy to adjust to taste):
-static UIBlurEffectStyle const kCommentBlurStyle = UIBlurEffectStyleSystemThinMaterial; // ↑transparent: …UltraThin; ↓: …Chrome
-static const CGFloat kCommentBlurInsetX  = 3.0;   // side margins (small, so the rounded corner doesn't crowd Done / the chevrons)
-static const CGFloat kCommentBlurInsetY  = 4.0;   // top/bottom margins
-static const CGFloat kCommentBlurCorner  = 14.0;  // corner radius
-static const CGFloat kCommentDoneNudgeX  = 14.0;  // Done button → right (off the rounded corner, more centered)
-static const CGFloat kCommentDoneNudgeY  = -6.0;  // Done button ↑ up (Apollo sits it a touch low)
-static const void *kCommentBlurKey = &kCommentBlurKey;
+static const CGFloat kCommentGlassInsetX = 3.0;
+static const CGFloat kCommentGlassInsetY = 4.0;
+static const void *kCommentGlassKey = &kCommentGlassKey;
+// Retain the preceding blur fallback exactly for ordinary/non-native builds. The real glass path below
+// replaces it only when UIGlassEffect is available; it must not change the existing iOS 14–25 presentation.
+static UIBlurEffectStyle const kCommentFallbackBlurStyle = UIBlurEffectStyleSystemThinMaterial;
+static const CGFloat kCommentFallbackBlurInsetX = 3.0;
+static const CGFloat kCommentFallbackBlurInsetY = 4.0;
+static const CGFloat kCommentFallbackBlurCorner = 14.0;
+static const CGFloat kCommentFallbackDoneNudgeX = 14.0;
+static const CGFloat kCommentFallbackDoneNudgeY = -6.0;
+static const void *kCommentFallbackBlurKey = &kCommentFallbackBlurKey;
+static const void *kCommentDoneStyledKey = &kCommentDoneStyledKey;
+static const void *kCommentDoneOriginalTitleKey = &kCommentDoneOriginalTitleKey;
+static const void *kCommentDoneOriginalImageKey = &kCommentDoneOriginalImageKey;
+static const void *kCommentDoneOriginalAccessibilityLabelKey = &kCommentDoneOriginalAccessibilityLabelKey;
+static const void *kCommentControlOriginalTransformKey = &kCommentControlOriginalTransformKey;
+static const void *kCommentControlOriginalTintKey = &kCommentControlOriginalTintKey;
+static const void *kCommentToolbarLoggedKey = &kCommentToolbarLoggedKey;
 
-// Nudge the docked find bar's "Done" button (Apollo's leftmost button) right + up via a transform (idempotent,
-// doesn't compound across layout passes, and the tap target moves with it).
-static void nudgeCommentDoneButton(UIView *bar) {
+static UIImage *ApolloCommentDoneImage(void) {
+    UIImageSymbolConfiguration *symbol =
+        [UIImageSymbolConfiguration configurationWithPointSize:14.0 weight:UIImageSymbolWeightSemibold];
+    return [[UIImage systemImageNamed:@"checkmark" withConfiguration:symbol]
+            imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+// The prior non-glass fallback: keep the old frosted bar and Done-button nudge unchanged when native
+// Liquid Glass is unavailable. This is deliberately separate from the iOS 26 styling below.
+static void nudgeCommentFallbackDoneButton(UIView *bar) {
     UIButton *done = nil;
     for (UIView *sv in bar.subviews) {
         if ([sv isKindOfClass:[UIButton class]] &&
@@ -96,32 +175,205 @@ static void nudgeCommentDoneButton(UIView *bar) {
         }
     }
     if (!done) return;
-    CGAffineTransform t = CGAffineTransformMakeTranslation(kCommentDoneNudgeX, kCommentDoneNudgeY);
-    if (!CGAffineTransformEqualToTransform(done.transform, t)) done.transform = t;
+    CGAffineTransform transform =
+        CGAffineTransformMakeTranslation(kCommentFallbackDoneNudgeX, kCommentFallbackDoneNudgeY);
+    if (!CGAffineTransformEqualToTransform(done.transform, transform)) done.transform = transform;
 }
 
-static void ensureCommentBlurBacking(UIView *bar) {
-    UIVisualEffectView *blur = objc_getAssociatedObject(bar, kCommentBlurKey);
+static void ensureCommentFallbackBlurBacking(UIView *bar) {
+    UIVisualEffectView *blur = objc_getAssociatedObject(bar, kCommentFallbackBlurKey);
     if (!blur) {
-        blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:kCommentBlurStyle]];
-        blur.userInteractionEnabled = NO; // never intercept Done / Find / chevron taps
+        blur = [[UIVisualEffectView alloc]
+            initWithEffect:[UIBlurEffect effectWithStyle:kCommentFallbackBlurStyle]];
+        blur.userInteractionEnabled = NO;
         blur.clipsToBounds = YES;
         blur.layer.cornerCurve = kCACornerCurveContinuous;
-        objc_setAssociatedObject(bar, kCommentBlurKey, blur, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(bar, kCommentFallbackBlurKey, blur, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (blur.superview != bar) [bar insertSubview:blur atIndex:0];
-    else if (bar.subviews.firstObject != blur) [bar sendSubviewToBack:blur]; // stay behind the controls
-    CGRect r = CGRectInset(bar.bounds, kCommentBlurInsetX, kCommentBlurInsetY);
-    blur.frame = r;
-    blur.layer.cornerRadius = MIN(kCommentBlurCorner, CGRectGetHeight(r) / 2.0);
-    if (bar.backgroundColor != nil) bar.backgroundColor = nil; // let the blur show through
+    else if (bar.subviews.firstObject != blur) [bar sendSubviewToBack:blur];
+    CGRect frame = CGRectInset(bar.bounds, kCommentFallbackBlurInsetX, kCommentFallbackBlurInsetY);
+    blur.frame = frame;
+    blur.layer.cornerRadius = MIN(kCommentFallbackBlurCorner, CGRectGetHeight(frame) / 2.0);
+    if (bar.backgroundColor != nil) bar.backgroundColor = nil;
     bar.opaque = NO;
 }
 
-static void removeCommentBlurBacking(UIView *bar) {
-    UIVisualEffectView *blur = objc_getAssociatedObject(bar, kCommentBlurKey);
+static void removeCommentFallbackBlurBacking(UIView *bar) {
+    UIVisualEffectView *blur = objc_getAssociatedObject(bar, kCommentFallbackBlurKey);
     if (blur.superview) [blur removeFromSuperview];
     if (bar.backgroundColor != nil) bar.backgroundColor = nil;
+}
+
+// Apollo's text "Done" is baseline-aligned for its old toolbar and lands visibly low after the bar moves
+// above the keyboard. Replace only its presentation with a centered checkmark; its existing target/action,
+// frame and accessibility action remain Apollo-owned.
+static void styleCommentToolbarControls(UIView *bar) {
+    UIButton *done = nil;
+    UIButton *leftmost = nil;
+    for (UIView *sv in bar.subviews) {
+        if (![sv isKindOfClass:[UIButton class]]) continue;
+        UIButton *button = (UIButton *)sv;
+        if (!leftmost || CGRectGetMinX(button.frame) < CGRectGetMinX(leftmost.frame)) leftmost = button;
+
+        // Prefer the real semantic control. The zero-width pre-layout pass can make every button look
+        // left-aligned, so coordinates alone are not enough to distinguish Done from the two find arrows.
+        NSString *title = [button titleForState:UIControlStateNormal];
+        NSString *accessibilityLabel = button.accessibilityLabel;
+        if ((title.length && [title caseInsensitiveCompare:@"Done"] == NSOrderedSame) ||
+            (accessibilityLabel.length && [accessibilityLabel caseInsensitiveCompare:@"Done"] == NSOrderedSame)) {
+            done = button;
+        }
+    }
+    done = done ?: leftmost;
+    if (!done) return;
+
+    if (![objc_getAssociatedObject(done, kCommentDoneStyledKey) boolValue]) {
+        objc_setAssociatedObject(done, kCommentDoneOriginalTitleKey,
+                                 [done titleForState:UIControlStateNormal] ?: [NSNull null],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(done, kCommentDoneOriginalImageKey,
+                                 [done imageForState:UIControlStateNormal] ?: [NSNull null],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(done, kCommentDoneOriginalAccessibilityLabelKey,
+                                 done.accessibilityLabel ?: [NSNull null],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(done, kCommentDoneStyledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    // Apollo can repopulate the title while its keyboard-transition layout settles. Reassert the visual
+    // representation every pass without touching its action or accessibility semantics.
+    [done setTitle:nil forState:UIControlStateNormal];
+    [done setImage:ApolloCommentDoneImage() forState:UIControlStateNormal];
+    done.accessibilityLabel = @"Done";
+
+    // UIKit bar buttons use labelColor by default under Liquid Glass. Match that adaptive contrast for the
+    // checkmark and Apollo's existing up/down controls, without recoloring any content outside this toolbar.
+    CGFloat targetCenterY = CGRectGetMidY(bar.bounds);
+    for (UIView *sv in bar.subviews) {
+        if (![sv isKindOfClass:[UIButton class]]) continue;
+        UIButton *button = (UIButton *)sv;
+        if (!objc_getAssociatedObject(button, kCommentControlOriginalTransformKey)) {
+            objc_setAssociatedObject(button, kCommentControlOriginalTransformKey,
+                                     [NSValue valueWithCGAffineTransform:button.transform],
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(button, kCommentControlOriginalTintKey,
+                                     button.tintColor ?: [NSNull null],
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        button.tintColor = [UIColor labelColor];
+        CGAffineTransform original =
+            [objc_getAssociatedObject(button, kCommentControlOriginalTransformKey) CGAffineTransformValue];
+        CGAffineTransform centered =
+            CGAffineTransformTranslate(original, 0.0, targetCenterY - button.center.y);
+        if (!CGAffineTransformEqualToTransform(button.transform, centered)) {
+            button.transform = centered;
+        }
+    }
+}
+
+static void restoreCommentToolbarControls(UIView *bar) {
+    for (UIView *sv in bar.subviews) {
+        if (![sv isKindOfClass:[UIButton class]]) continue;
+        UIButton *button = (UIButton *)sv;
+        NSValue *originalTransform = objc_getAssociatedObject(button, kCommentControlOriginalTransformKey);
+        if (originalTransform) button.transform = originalTransform.CGAffineTransformValue;
+        id originalTint = objc_getAssociatedObject(button, kCommentControlOriginalTintKey);
+        if (originalTint) button.tintColor = originalTint == [NSNull null] ? nil : originalTint;
+        objc_setAssociatedObject(button, kCommentControlOriginalTransformKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(button, kCommentControlOriginalTintKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (![objc_getAssociatedObject(button, kCommentDoneStyledKey) boolValue]) continue;
+
+        id originalTitle = objc_getAssociatedObject(button, kCommentDoneOriginalTitleKey);
+        id originalImage = objc_getAssociatedObject(button, kCommentDoneOriginalImageKey);
+        id originalAccessibilityLabel = objc_getAssociatedObject(button, kCommentDoneOriginalAccessibilityLabelKey);
+        [button setTitle:(originalTitle == [NSNull null] ? nil : originalTitle)
+               forState:UIControlStateNormal];
+        [button setImage:(originalImage == [NSNull null] ? nil : originalImage)
+               forState:UIControlStateNormal];
+        button.accessibilityLabel = originalAccessibilityLabel == [NSNull null] ? nil : originalAccessibilityLabel;
+        objc_setAssociatedObject(button, kCommentDoneStyledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(button, kCommentDoneOriginalTitleKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(button, kCommentDoneOriginalImageKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(button, kCommentDoneOriginalAccessibilityLabelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static void ensureCommentGlassBacking(UIView *bar) {
+    removeCommentFallbackBlurBacking(bar);
+    UIVisualEffectView *glass = objc_getAssociatedObject(bar, kCommentGlassKey);
+    if (!glass) {
+        UIVisualEffect *effect = ApolloNewGlassEffect(NO);
+        if (!effect) return;
+        glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+        glass.userInteractionEnabled = NO; // never intercept Done / Find / chevron taps
+        glass.accessibilityElementsHidden = YES;
+        glass.frame = CGRectInset(bar.bounds, kCommentGlassInsetX, kCommentGlassInsetY);
+        glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        ApolloUseCapsuleCorners(glass);
+        objc_setAssociatedObject(bar, kCommentGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (glass.superview != bar) [bar insertSubview:glass atIndex:0];
+    else if (bar.subviews.firstObject != glass) [bar sendSubviewToBack:glass];
+    if (bar.backgroundColor != nil) bar.backgroundColor = nil;
+    bar.opaque = NO;
+    styleCommentToolbarControls(bar);
+
+    if (![objc_getAssociatedObject(bar, kCommentToolbarLoggedKey) boolValue]) {
+        objc_setAssociatedObject(bar, kCommentToolbarLoggedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        for (UIView *sv in bar.subviews) {
+            [parts addObject:[NSString stringWithFormat:@"%@ %@",
+                              NSStringFromClass(sv.class), NSStringFromCGRect(sv.frame)]];
+        }
+        ApolloLog(@"[SearchGlass] Docked comment toolbar %@; subviews=%@",
+                  NSStringFromCGRect(bar.frame), [parts componentsJoinedByString:@", "]);
+    }
+}
+
+static void removeCommentGlassBacking(UIView *bar) {
+    UIVisualEffectView *glass = objc_getAssociatedObject(bar, kCommentGlassKey);
+    if (glass.superview) [glass removeFromSuperview];
+    restoreCommentToolbarControls(bar);
+    if (bar.backgroundColor != nil) bar.backgroundColor = nil;
+}
+
+// Give each resting feed/thread field its own real glass capsule. Once Find in Comments docks, the field
+// joins the shared toolbar glass above instead, so there are never overlapping Liquid Glass surfaces.
+static void updateNativeSearchFieldGlass(UITextField *field) {
+    if (!field) return;
+
+    UIVisualEffectView *glass = objc_getAssociatedObject(field, kSearchFieldGlassKey);
+    UIView *toolbar = field.superview;
+    BOOL usesSharedCommentGlass =
+        toolbar && isCommentToolbar(toolbar) && toolbarDocked(toolbar);
+
+    if (!ApolloNativeSearchGlassAvailable() || !toolbar || usesSharedCommentGlass) {
+        if (glass.superview) [glass removeFromSuperview];
+        return;
+    }
+
+    if (!glass) {
+        UIVisualEffect *effect = ApolloNewGlassEffect(NO);
+        if (!effect) return;
+        glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+        glass.userInteractionEnabled = NO;
+        glass.accessibilityElementsHidden = YES;
+        ApolloUseCapsuleCorners(glass);
+        objc_setAssociatedObject(field, kSearchFieldGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    if (glass.superview != toolbar) [toolbar insertSubview:glass belowSubview:field];
+    else if ([toolbar.subviews indexOfObject:glass] > [toolbar.subviews indexOfObject:field]) {
+        [toolbar insertSubview:glass belowSubview:field];
+    }
+    glass.frame = field.frame;
+    field.opaque = NO;
+
+    if (![objc_getAssociatedObject(field, kSearchFieldGlassLoggedKey) boolValue]) {
+        objc_setAssociatedObject(field, kSearchFieldGlassLoggedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[SearchGlass] Installed native field glass in %@ (%@)",
+                  NSStringFromClass(toolbar.class), NSStringFromCGRect(field.frame));
+    }
 }
 
 // MARK: - Nav-bar hide
@@ -288,6 +540,7 @@ static const CGFloat kXFieldGap    = 12.0;  // field right edge -> circle left e
 // (sub_1002be378) and frame the button — returning a fixed square lets Apollo do all the geometry with
 // no frame writes from us. In-place mode places the button itself instead.
 static const void *kRoundXKey = &kRoundXKey;
+static const void *kNativeRoundXConfiguredKey = &kNativeRoundXConfiguredKey;
 
 // The toolbar's resting (pre-dock) height, captured on focus. OFF mode fires the round-X slide-in only
 // once the toolbar grows past this (i.e. has docked), not on the resting pass.
@@ -299,7 +552,8 @@ static void tagRoundXButton(UIButton *btn) {
     }
 }
 
-// Cached neutral-gray xmark glyph (AlwaysOriginal so it never picks up Apollo's accent tint).
+// Cached template xmark. Native glass chooses adaptive foreground contrast; the old-runtime fallback
+// below applies its own neutral gray explicitly.
 static UIImage *roundXImage(void) {
     static UIImage *img = nil;
     static dispatch_once_t once;
@@ -307,8 +561,7 @@ static UIImage *roundXImage(void) {
         UIImageSymbolConfiguration *cfg =
             [UIImageSymbolConfiguration configurationWithPointSize:12.0 weight:UIImageSymbolWeightBold];
         img = [[UIImage systemImageNamed:@"xmark" withConfiguration:cfg]
-                  imageWithTintColor:[UIColor colorWithWhite:0.62 alpha:1.0]
-                       renderingMode:UIImageRenderingModeAlwaysOriginal];
+               imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     });
     return img;
 }
@@ -335,10 +588,33 @@ static CGFloat fieldMaxRight(UIView *toolbar) {
 // Style the round-X each layout pass: clear the title, show the glyph in a circular fill, and (in-place
 // only) force its size/center. Strips Apollo's own button animations so only our slide shows.
 static void styleCancelAsRoundX(UIButton *btn, UIView *toolbar, UIView *field) {
-    // Appearance (idempotent): clear the "Cancel" title, show the gray xmark in a circle.
-    if (btn.currentImage == nil || btn.currentTitle.length > 0) {
+    // Appearance (idempotent): use UIKit's actual iOS 26 glass button configuration whenever available.
+    // The fallback retains the previous hand-drawn circle only for a linked-glass build on a runtime that
+    // somehow lacks UIGlassEffect/UIButtonConfiguration.
+    BOOL usesNativeGlass = ApolloNativeSearchGlassAvailable();
+    id glassConfiguration = nil;
+    if (usesNativeGlass &&
+        ![objc_getAssociatedObject(btn, kNativeRoundXConfiguredKey) boolValue]) {
+        glassConfiguration = ApolloGlassButtonConfiguration(roundXImage());
+    }
+    if (glassConfiguration) {
         [btn setTitle:@"" forState:UIControlStateNormal];
-        [btn setImage:roundXImage() forState:UIControlStateNormal];
+        ((void (*)(id, SEL, id))objc_msgSend)(btn, NSSelectorFromString(@"setConfiguration:"),
+                                              glassConfiguration);
+        objc_setAssociatedObject(btn, kNativeRoundXConfiguredKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (usesNativeGlass) {
+        btn.backgroundColor = nil;
+        btn.tintColor = [UIColor labelColor];
+        btn.layer.cornerRadius = 0.0;
+        btn.layer.masksToBounds = NO;
+    } else if (btn.currentImage == nil || btn.currentTitle.length > 0) {
+        [btn setTitle:@"" forState:UIControlStateNormal];
+        UIImage *fallbackImage = [roundXImage()
+            imageWithTintColor:[UIColor colorWithWhite:0.62 alpha:1.0]
+                 renderingMode:UIImageRenderingModeAlwaysOriginal];
+        [btn setImage:fallbackImage forState:UIControlStateNormal];
         btn.backgroundColor = field.backgroundColor ?: [UIColor colorWithWhite:0.137 alpha:1.0];
         btn.layer.cornerRadius = kXSize / 2.0;
         btn.layer.masksToBounds = YES;
@@ -367,25 +643,12 @@ static void styleCancelAsRoundX(UIButton *btn, UIView *toolbar, UIView *field) {
     }
 }
 
-// Dismiss the round-X. In-place fades it out (alpha 0 — authoritative, since the toolbar is pinned and
-// clips); OFF slides it off the right edge via a transform.
+// Dismiss the round-X by sliding the entire native glass control back through the trailing edge. Keeping
+// the effect at alpha 1 lets UIKit render its glass correctly throughout the transition.
 static void animateCancelOut(void) {
     UIView *toolbar = sFeedSearchToolbar;
     UIButton *cancel = sFeedSearchCancel;
     if (!toolbar || ![cancel isKindOfClass:[UIButton class]]) return;
-
-    if (sKeepSearchBarInPlace) {
-        if ([cancel.layer animationForKey:@"sipXFade"]) return; // already fading out
-        [cancel.layer removeAnimationForKey:@"sipXIn"];
-        cancel.alpha = 0.0; // model hidden so it stays gone after the fade
-        CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
-        fade.fromValue = @1.0;
-        fade.toValue = @0.0;
-        fade.duration = 0.22;
-        fade.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-        [cancel.layer addAnimation:fade forKey:@"sipXFade"];
-        return;
-    }
 
     if ([cancel.layer animationForKey:@"sipXOut"]) return; // already sliding out
     [cancel.layer removeAnimationForKey:@"sipXIn"];
@@ -541,7 +804,7 @@ static void recenterCancelButton(void) {
         ApolloFeedSearchRestoreHeader();              // bring the chrome back as the search closes
         NSUInteger gen = ++sFeedSearchDismissGen;     // a newer dismiss / re-focus invalidates this timer
         %orig;
-        animateCancelOut();                           // fade the round-X out
+        animateCancelOut();                           // slide the native glass X out
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (gen != sFeedSearchDismissGen) return; // re-focused / re-dismissed meanwhile
@@ -845,14 +1108,30 @@ static void recenterCancelButton(void) {
 // flies in from the docked-top geometry.
 - (void)layoutSubviews {
     %orig;
-    // "Find in Comments" bar (in-thread search, excluded from the feed handling above): when it's docked
-    // (active find-in-page) it's transparent, so the comments behind it bleed through Done / the chevrons.
-    // Back it with a blur material (frosted glass) while docked so it's legible but still translucent — it
-    // tracks light/dark and matches the Liquid Glass chrome; clear it back at the resting pill.
+    // "Find in Comments" bar (in-thread search, excluded from the feed handling above): group its field,
+    // centered checkmark and chevrons in one genuine Liquid Glass surface while docked.
     if (isCommentToolbar((UIView *)self)) {
         UIView *tbv = (UIView *)self;
-        if (toolbarDocked(tbv)) { ensureCommentBlurBacking(tbv); nudgeCommentDoneButton(tbv); }
-        else removeCommentBlurBacking(tbv);
+        if (toolbarDocked(tbv)) {
+            if (ApolloNativeSearchGlassAvailable()) {
+                ensureCommentGlassBacking(tbv);
+            } else {
+                removeCommentGlassBacking(tbv);
+                ensureCommentFallbackBlurBacking(tbv);
+                nudgeCommentFallbackDoneButton(tbv);
+            }
+        } else {
+            removeCommentGlassBacking(tbv);
+            removeCommentFallbackBlurBacking(tbv);
+        }
+        // Re-evaluate the field after the toolbar is reparented. This removes its standalone glass when
+        // docked and restores it when the field returns to the top of the thread.
+        for (UIView *sv in tbv.subviews) {
+            if ([sv isKindOfClass:NSClassFromString(@"_TtC6Apollo24ApolloSearchBarTextField")]) {
+                updateNativeSearchFieldGlass((UITextField *)sv);
+                break;
+            }
+        }
     }
     if (!IsLiquidGlass() || (UIView *)self != sFeedSearchToolbar ||
         (!sFeedSearchActive && !sFeedSearchDismissing)) {
@@ -897,6 +1176,16 @@ static void recenterCancelButton(void) {
 
 %hook _TtC6Apollo24ApolloSearchBarTextField
 
+- (void)setBackgroundColor:(UIColor *)color {
+    // Apollo (and custom themes) still supply a flat fill. The system material underneath owns the
+    // background in linked-glass builds; preserve the exact old color path everywhere else.
+    if (ApolloNativeSearchGlassAvailable()) {
+        %orig([UIColor clearColor]);
+        return;
+    }
+    %orig;
+}
+
 - (void)setFrame:(CGRect)frame {
     UIView *sup = [(UIView *)self superview];
     if (IsLiquidGlass() && sKeepSearchBarInPlace && sFeedSearchActive && !sFeedSearchDismissing &&
@@ -907,6 +1196,17 @@ static void recenterCancelButton(void) {
         }
     }
     %orig(frame);
+    updateNativeSearchFieldGlass((UITextField *)self);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    updateNativeSearchFieldGlass((UITextField *)self);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    updateNativeSearchFieldGlass((UITextField *)self);
 }
 
 %end

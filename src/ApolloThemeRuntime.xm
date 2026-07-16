@@ -1490,6 +1490,13 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 %hook _TtC6Apollo24ApolloSearchBarTextField
 
 - (void)setBackgroundColor:(UIColor *)color {
+    // ApolloSearchInPlace supplies UIKit's real UIGlassEffect beneath this custom text field when the
+    // app is linked for Liquid Glass. Do not replace its clear fill with the theme's Raised token; text,
+    // cursor and icon colors remain themed normally, while the system material handles adaptive contrast.
+    if (IsLiquidGlass() && NSClassFromString(@"UIGlassEffect")) {
+        %orig(color);
+        return;
+    }
     UIColor *raised = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground);
     %orig(raised ?: color);
 }
