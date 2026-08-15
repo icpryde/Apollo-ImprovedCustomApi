@@ -161,6 +161,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloVideoSwipeFix.xm \
     $(SRC_DIR)/ApolloVideoPlaybackSpeed.xm \
     $(SRC_DIR)/ApolloVideoHoldSpeed.xm \
+    $(SRC_DIR)/ApolloMediaViewerInfoCard.xm \
     $(SRC_DIR)/ApolloPictureInPicture.xm \
     $(SRC_DIR)/ApolloMediaPreviewErrorFix.xm \
     $(SRC_DIR)/ApolloSubredditIndexPolish.xm \

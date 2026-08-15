@@ -69,6 +69,11 @@ static NSString *const UDKeyUnmuteCommentsVideos = @"UnmuteCommentsVideos";
 // registerDefaults — preserves the original always-on behaviour) and the speed
 // applied while held (one of 0.25/0.5/0.75/1.25/1.5/2.0; default 2.0×). See
 // ApolloVideoHoldSpeed.xm.
+// "Video Info Card": show the post title/author card in the fullscreen media
+// viewer. Default YES. The card's own close button writes NO here, so
+// dismissing it once keeps it dismissed; the settings row brings it back.
+// See ApolloMediaViewerInfoCard.xm.
+static NSString *const UDKeyMediaViewerInfoCard = @"MediaViewerInfoCard";
 static NSString *const UDKeyVideoHoldSpeedEnabled = @"VideoHoldSpeedEnabled";
 static NSString *const UDKeyVideoHoldSpeed = @"VideoHoldSpeed";
 static NSString *const UDKeyOpenLinksInSteamApp = @"OpenLinksInSteamApp";

@@ -291,6 +291,11 @@ typedef NS_ENUM(NSInteger, Tag) {
     });
 }
 
+- (void)mediaViewerInfoCardSwitchToggled:(UISwitch *)sender {
+    sMediaViewerInfoCard = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sMediaViewerInfoCard forKey:UDKeyMediaViewerInfoCard];
+}
+
 - (NSString *)mediaUploadProviderText {
     switch (sImageUploadProvider) {
         case ImageUploadProviderReddit:   return @"Reddit";
@@ -1716,9 +1721,15 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     // Only shown while Hold for Video Speed is on (see -videoHoldSpeedSwitchToggled:).
     holdSpeedValue.visible = ^BOOL { return sVideoHoldSpeedEnabled; };
 
+    ApolloSettingsRow *infoCard =
+        [ApolloSettingsRow switchRowWithID:@"media.infoCard"
+                                     title:@"Video Info Card"
+                                      isOn:^BOOL { return sMediaViewerInfoCard; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf mediaViewerInfoCardSwitchToggled:sender]; }];
+
     return [ApolloSettingsSection sectionWithTitle:@"Playback"
-                                            footer:@"Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
-                                              rows:@[ gifFallback, unmuteComments, holdSpeed, holdSpeedValue ]];
+                                            footer:@"Video Info Card shows the post title and author under a fullscreen video, above the playback controls; you can also hide it with the close button on the card itself. Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
+                                              rows:@[ gifFallback, unmuteComments, infoCard, holdSpeed, holdSpeedValue ]];
 }
 
 - (ApolloSettingsSection *)buildMediaInlineSection {

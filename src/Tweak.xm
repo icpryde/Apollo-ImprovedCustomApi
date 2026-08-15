@@ -3427,6 +3427,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyDevvitFeedWidgets: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
                                     UDKeyUnmuteCommentsVideos: @0,
+                                    UDKeyMediaViewerInfoCard: @YES,
                                     UDKeyVideoHoldSpeedEnabled: @YES,
                                     UDKeyVideoHoldSpeed: @2.0,
                                     UDKeyProxyImgurDDG: @NO,
@@ -3551,6 +3552,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sPreferredGIFFallbackFormat = ([[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
     sReadPostMaxCount = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyReadPostMaxCount];
     sUnmuteCommentsVideos = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyUnmuteCommentsVideos];
+    sMediaViewerInfoCard = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyMediaViewerInfoCard];
     sVideoHoldSpeedEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyVideoHoldSpeedEnabled];
     sVideoHoldSpeed = ApolloSanitizedHoldSpeed([[NSUserDefaults standardUserDefaults] floatForKey:UDKeyVideoHoldSpeed]);
     sProxyImgurDDG = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG];

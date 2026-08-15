@@ -28,6 +28,8 @@ NSInteger sReadPostMaxCount = 0;
 
 NSInteger sUnmuteCommentsVideos = 0; // 0=Default, 1=Remember from Full Screen, 2=Always
 
+BOOL sMediaViewerInfoCard = YES;  // effective default ON via registerDefaults (UDKeyMediaViewerInfoCard)
+
 BOOL sVideoHoldSpeedEnabled = YES;   // effective default ON via registerDefaults (UDKeyVideoHoldSpeedEnabled)
 float sVideoHoldSpeed = 2.0f;        // effective default 2.0× via registerDefaults (UDKeyVideoHoldSpeed)
 

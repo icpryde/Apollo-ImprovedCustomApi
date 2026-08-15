@@ -45,6 +45,11 @@ extern NSInteger sUnmuteCommentsVideos;
 // prior rate. When OFF the right side behaves like the rest of the player (normal
 // long-press menu). sVideoHoldSpeed is one of 0.25/0.5/0.75/1.25/1.5/2.0 (default
 // 2.0×). Both default via registerDefaults. See ApolloVideoHoldSpeed.xm.
+// "Video Info Card" — the post title/author card under the fullscreen video.
+// Default ON; the card's close button turns it off. See
+// ApolloMediaViewerInfoCard.xm.
+extern BOOL sMediaViewerInfoCard;
+
 extern BOOL sVideoHoldSpeedEnabled;
 extern float sVideoHoldSpeed;
 // Snap an arbitrary stored value to the nearest supported hold speed; falls back
